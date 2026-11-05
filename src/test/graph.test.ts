@@ -1,6 +1,8 @@
 import * as assert from 'assert';
 import { buildEdges, buildTree } from '../graph/build';
 import { scanImports } from '../graph/imports';
+import { computeIndegrees, indexNodes, nodeSize } from '../graph/metrics';
+import { Edge } from '../graph/types';
 import { resolveImport } from '../graph/resolve';
 
 suite('buildTree', () => {
@@ -35,6 +37,37 @@ suite('buildEdges', () => {
 			{ from: 'src/app.ts', to: 'src/lib/b.ts', kind: 'import' },
 			{ from: 'src/lib/b.ts', to: 'README.md', kind: 'import' },
 		]);
+	});
+});
+
+suite('computeIndegrees', () => {
+	test('counts imports entering each node from outside it', () => {
+		const nodes = buildTree('repo', ['src/app.ts', 'src/lib/b.ts', 'src/lib/c.ts']);
+		const edges: Edge[] = [
+			{ from: 'src/app.ts', to: 'src/lib/b.ts', kind: 'import' },
+			{ from: 'src/lib/c.ts', to: 'src/lib/b.ts', kind: 'import' },
+		];
+
+		const indegrees = computeIndegrees(indexNodes(nodes), edges);
+
+		assert.strictEqual(indegrees.get('src/lib/b.ts'), 2);
+		assert.strictEqual(indegrees.get('src/lib'), 1);
+		assert.strictEqual(indegrees.get('src'), 0);
+		assert.strictEqual(indegrees.get('.'), 0);
+	});
+});
+
+suite('nodeSize', () => {
+	test('gives the smallest box to a node with no children or imports', () => {
+		assert.deepStrictEqual(nodeSize(0, 0), { width: 120, height: 36 });
+	});
+
+	test('grows with children and imports', () => {
+		assert.deepStrictEqual(nodeSize(3, 7), { width: 190, height: 60 });
+	});
+
+	test('never grows past the maximum', () => {
+		assert.deepStrictEqual(nodeSize(100000, 100000), { width: 260, height: 84 });
 	});
 });
 
