@@ -1,4 +1,4 @@
-import { Edge, Node } from './types';
+import { Edge, Node } from '../graph/types';
 
 // box sizes in pixels, starting guesses to tune once the graph is on screen
 const MIN_WIDTH = 120;

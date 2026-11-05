@@ -1,8 +1,9 @@
 import * as assert from 'assert';
 import { buildEdges, buildTree } from '../graph/build';
 import { scanImports } from '../graph/imports';
-import { computeIndegrees, indexNodes, nodeSize } from '../graph/metrics';
+import { computeIndegrees, indexNodes, nodeSize } from '../view/metrics';
 import { Edge } from '../graph/types';
+import { CHILD_LIMIT, getVisibleNodes, indexChildren, sortChildrenOfFolder } from '../view/visibility';
 import { resolveImport } from '../graph/resolve';
 
 suite('buildTree', () => {
@@ -68,6 +69,55 @@ suite('nodeSize', () => {
 
 	test('never grows past the maximum', () => {
 		assert.deepStrictEqual(nodeSize(100000, 100000), { width: 260, height: 84 });
+	});
+});
+
+suite('getVisibleNodes', () => {
+	const nodes = buildTree('repo', ['README.md', 'src/app.ts', 'src/lib/b.ts', 'test/b.test.ts']);
+	const childrenById = indexChildren(nodes);
+
+	test('shows only the top level when nothing is expanded', () => {
+		const visible = getVisibleNodes(childrenById, new Set(), new Map());
+
+		assert.deepStrictEqual(visible.nodeIds, ['.', 'README.md', 'src', 'test']);
+	});
+
+	test('goes into expanded folders and stops at collapsed ones', () => {
+		const visible = getVisibleNodes(childrenById, new Set(['src']), new Map());
+
+		assert.deepStrictEqual(visible.nodeIds, ['.', 'README.md', 'src', 'src/app.ts', 'src/lib', 'test']);
+	});
+
+	suite('with more children than the limit', () => {
+		const paths = Array.from({ length: 15 }, (_, index) => `src/file${index + 10}.ts`);
+		const bigFolderChildren = indexChildren(buildTree('repo', paths));
+
+		test('collapses the extra children into a box', () => {
+			const visible = getVisibleNodes(bigFolderChildren, new Set(['src']), new Map());
+
+			assert.strictEqual(visible.nodeIds.length, 2 + CHILD_LIMIT); // the root, src, and the shown files
+			assert.deepStrictEqual(visible.moreBoxes, [
+				{ id: 'src#more', parent: 'src', hiddenIds: paths.slice(CHILD_LIMIT) },
+			]);
+		});
+
+		test('shows more children once revealed', () => {
+			const visible = getVisibleNodes(bigFolderChildren, new Set(['src']), new Map([['src', 15]]));
+
+			assert.strictEqual(visible.nodeIds.length, 2 + 15);
+			assert.deepStrictEqual(visible.moreBoxes, []);
+		});
+	});
+});
+
+suite('sortChildrenOfFolder', () => {
+	test('puts the highest indegree first and breaks ties alphabetically', () => {
+		const nodes = buildTree('repo', ['a.ts', 'b.ts', 'z.ts']);
+		const indegrees = new Map([['a.ts', 0], ['b.ts', 0], ['z.ts', 5]]);
+
+		const sorted = sortChildrenOfFolder(['a.ts', 'b.ts', 'z.ts'], indexNodes(nodes), indegrees);
+
+		assert.deepStrictEqual(sorted, ['z.ts', 'a.ts', 'b.ts']);
 	});
 });
 
