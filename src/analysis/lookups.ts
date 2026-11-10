@@ -33,6 +33,33 @@ export function indexChildren(nodes: Node[]): Map<string, string[]> {
 }
 
 /**
+ * Groups nodes under their parents, for showing a list folder by folder.
+ * @param ids The nodes to group.
+ * @param nodesById Every node in the graph, by id.
+ * @returns A map from each parent's id to its nodes from the list. Parents are sorted by path, and nodes by id.
+ */
+export function groupByParent(ids: string[], nodesById: Map<string, Node>): Map<string, string[]> {
+	const unsorted = new Map<string, string[]>();
+	for (const id of ids) {
+		const parentId = nodesById.get(id)!.parent!;
+		const siblings = unsorted.get(parentId) ?? [];
+		siblings.push(id);
+		unsorted.set(parentId, siblings);
+	}
+
+	function compareIds(a: string, b: string): number {
+		return a < b ? -1 : 1;
+	}
+
+	// a new map, filled in sorted order, since a map lists its entries in the order they were added
+	const grouped = new Map<string, string[]>();
+	for (const parentId of Array.from(unsorted.keys()).toSorted(compareIds)) {
+		grouped.set(parentId, unsorted.get(parentId)!.toSorted(compareIds));
+	}
+	return grouped;
+}
+
+/**
  * Lists a node and everything above it, up to the root.
  * @param id The node to start from.
  * @param nodesById Every node in the graph, by id.

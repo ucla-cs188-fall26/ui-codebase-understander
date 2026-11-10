@@ -56,6 +56,44 @@ export function keepOnePerPair(edges: Edge[]): Edge[] {
 }
 
 /**
+ * Checks whether a node is a container or anywhere inside it.
+ * @param nodeId The node.
+ * @param containerId The possible container.
+ * @param nodesById Every node in the graph, by id.
+ * @returns True if the node is the container or one of its descendants.
+ */
+export function isInside(nodeId: string, containerId: string, nodesById: Map<string, Node>): boolean {
+	return getLineage(nodeId, nodesById).includes(containerId);
+}
+
+/**
+ * Lists what a node connects to across its boundary: for a folder, edges between its insides and the rest of the graph.
+ * @param id The node.
+ * @param edges Every edge in the graph.
+ * @param nodesById Every node in the graph, by id.
+ * @returns The nodes outside it that it has edges to, and the ones with edges into it, each once, in edge order.
+ */
+export function connections(id: string, edges: Edge[], nodesById: Map<string, Node>): { outgoing: string[]; incoming: string[] } {
+	const outgoing = new Set<string>();
+	const incoming = new Set<string>();
+
+	for (const edge of edges) {
+		const fromInside = isInside(edge.from, id, nodesById);
+		const toInside = isInside(edge.to, id, nodesById);
+
+		// only edges crossing the boundary: one end inside, the other outside
+		if (fromInside && !toInside) {
+			outgoing.add(edge.to);
+		}
+		if (!fromInside && toInside) {
+			incoming.add(edge.from);
+		}
+	}
+
+	return { outgoing: Array.from(outgoing), incoming: Array.from(incoming) };
+}
+
+/**
  * Finds which direct child of a parent holds a node, so nested nodes can stand in for their containers.
  * @param id The node to look for.
  * @param parentId The parent whose children we want.

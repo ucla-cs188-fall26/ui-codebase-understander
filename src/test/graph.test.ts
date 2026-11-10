@@ -1,9 +1,9 @@
 import * as assert from 'assert';
 import { buildEdges, buildTree } from '../graph/build';
 import { scanImports } from '../graph/imports';
-import { indexChildren, indexNodes } from '../analysis/lookups';
+import { groupByParent, indexChildren, indexNodes } from '../analysis/lookups';
 import { computeIndegrees, sortChildren } from '../analysis/metrics';
-import { findChildContaining, liftEdges } from '../analysis/edges';
+import { connections, findChildContaining, liftEdges } from '../analysis/edges';
 import { assignColumns, findBackEdges } from '../layout/columns';
 import { defaultLayout, GAP } from '../layout/defaultLayout';
 import { arrowPath, chooseSides, placeArrows } from '../layout/arrows';
@@ -205,6 +205,42 @@ suite('liftEdges', () => {
 		assert.deepStrictEqual(lifted, [
 			{ from: 'src/a.ts', to: 'src/lib', kind: 'import' },
 		]);
+	});
+});
+
+suite('groupByParent', () => {
+	test('groups nodes under their parents, both sorted', () => {
+		const nodes = buildTree('repo', ['src/b.ts', 'src/a.ts', 'lib/c.ts', 'README.md']);
+
+		const grouped = groupByParent(['src/b.ts', 'README.md', 'src/a.ts', 'lib/c.ts'], indexNodes(nodes));
+
+		assert.deepStrictEqual(Array.from(grouped.entries()), [
+			['.', ['README.md']],
+			['lib', ['lib/c.ts']],
+			['src', ['src/a.ts', 'src/b.ts']],
+		]);
+	});
+});
+
+suite('connections', () => {
+	test('lists only edges crossing a node\'s boundary', () => {
+		const nodes = buildTree('repo', ['src/a.ts', 'src/lib/b.ts', 'src/lib/c.ts', 'README.md']);
+		const nodesById = indexNodes(nodes);
+		const edges: Edge[] = [
+			{ from: 'src/a.ts', to: 'src/lib/b.ts', kind: 'import' },
+			{ from: 'src/lib/b.ts', to: 'src/lib/c.ts', kind: 'import' },
+			{ from: 'src/lib/c.ts', to: 'README.md', kind: 'import' },
+		];
+
+		// b → c stays inside lib, so only the edges in from a.ts and out to README.md count
+		assert.deepStrictEqual(connections('src/lib', edges, nodesById), {
+			outgoing: ['README.md'],
+			incoming: ['src/a.ts'],
+		});
+		assert.deepStrictEqual(connections('src/a.ts', edges, nodesById), {
+			outgoing: ['src/lib/b.ts'],
+			incoming: [],
+		});
 	});
 });
 

@@ -14,6 +14,9 @@ export async function openGraphPanel(context: vscode.ExtensionContext): Promise<
 		return;
 	}
 
+	// saved here, past the check above, so functions inside can use it without re-checking for undefined
+	const workspaceUri = folder.uri;
+
 	const distFolder = vscode.Uri.joinPath(context.extensionUri, 'dist');
 	const panel = vscode.window.createWebviewPanel(
 		'codeflowGraph',
@@ -28,18 +31,26 @@ export async function openGraphPanel(context: vscode.ExtensionContext): Promise<
 	// start scanning now, so it runs while the webview loads
 	const graphPromise = loadGraph(folder);
 
-	// the webview says "ready" each time its script starts, including after VS Code reloads a hidden panel
 	async function handleMessage(message: WebviewToExtension): Promise<void> {
-		if (message.type !== 'ready') {
-			return;
+		// the webview says "ready" each time its script starts, including after VS Code reloads a hidden panel
+		if (message.type === 'ready') {
+			try {
+				const graph = await graphPromise;
+				const reply: ExtensionToWebview = { type: 'graph', graph: graph };
+				panel.webview.postMessage(reply);
+			} catch (error) {
+				vscode.window.showErrorMessage('Could not build the graph: ' + String(error));
+			}
 		}
 
-		try {
-			const graph = await graphPromise;
-			const reply: ExtensionToWebview = { type: 'graph', graph: graph };
-			panel.webview.postMessage(reply);
-		} catch (error) {
-			vscode.window.showErrorMessage('Could not build the graph: ' + String(error));
+		if (message.type === 'open') {
+			const uri = vscode.Uri.joinPath(workspaceUri, message.path);
+			if (message.kind === 'file') {
+				// beside the graph, so the graph stays in view
+				await vscode.window.showTextDocument(uri, { viewColumn: vscode.ViewColumn.Beside });
+			} else {
+				await vscode.commands.executeCommand('revealInExplorer', uri);
+			}
 		}
 	}
 
@@ -81,6 +92,9 @@ function buildHtml(scriptUri: vscode.Uri): string {
 		#world {
 			position: relative;
 			transform-origin: 0 0;
+		}
+		#world.gliding {
+			transition: transform 300ms ease-out;
 		}
 		.arrow {
 			position: absolute;
@@ -142,6 +156,120 @@ function buildHtml(scriptUri: vscode.Uri): string {
 			border-style: dashed;
 			color: var(--vscode-descriptionForeground);
 		}
+		#sidebar {
+			display: none;
+			position: fixed;
+			top: 12px;
+			right: 12px;
+			width: 280px;
+			max-height: calc(100% - 24px);
+			z-index: 1000;
+			box-sizing: border-box;
+			padding: 12px 16px;
+			overflow-y: auto;
+			cursor: default;
+			border-radius: 8px;
+			background: var(--vscode-editorWidget-background);
+			color: var(--vscode-editorWidget-foreground);
+			border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+			box-shadow: 0 4px 16px var(--vscode-widget-shadow);
+		}
+		#sidebar.visible {
+			display: block;
+		}
+		.sidebar-header {
+			display: flex;
+			align-items: center;
+			gap: 8px;
+			font-weight: 600;
+		}
+		.icon-button {
+			display: flex;
+			flex-shrink: 0;
+			align-items: center;
+			justify-content: center;
+			width: 24px;
+			height: 24px;
+			padding: 0;
+			border: none;
+			border-radius: 4px;
+			background: none;
+			color: inherit;
+			cursor: pointer;
+		}
+		.icon-button:hover {
+			background: var(--vscode-toolbar-hoverBackground);
+		}
+		.icon-button svg {
+			fill: none;
+			stroke: currentColor;
+			stroke-width: 1.5;
+		}
+		.sidebar-close {
+			margin-left: auto;
+		}
+		.sidebar-row {
+			display: flex;
+			gap: 8px;
+			margin-top: 6px;
+		}
+		/* a row with a button centers it on the text; other rows stay top-aligned so wrapped labels read well */
+		.sidebar-row:has(.icon-button) {
+			align-items: center;
+		}
+		.sidebar-label {
+			flex-shrink: 0;
+			width: 96px;
+			color: var(--vscode-descriptionForeground);
+		}
+		.sidebar-value {
+			overflow-wrap: anywhere;
+		}
+		.sidebar-link {
+			display: flex;
+			align-items: center;
+			gap: 4px;
+			cursor: pointer;
+		}
+		.sidebar-link-text {
+			flex: 1;
+			overflow: hidden;
+			white-space: nowrap;
+			text-overflow: ellipsis;
+		}
+		.sidebar-link:hover .sidebar-link-text {
+			color: var(--vscode-textLink-foreground);
+			text-decoration: underline;
+		}
+		/* one open button per row would be cluttered, so it only shows on the row under the mouse;
+		   it is also smaller here, since even hidden it sets how tall each row is */
+		.sidebar-link .icon-button {
+			visibility: hidden;
+			width: 18px;
+			height: 18px;
+		}
+		.sidebar-link .icon-button svg {
+			width: 14px;
+			height: 14px;
+		}
+		.sidebar-link:hover .icon-button {
+			visibility: visible;
+		}
+		.sidebar-folder {
+			font-weight: 600;
+		}
+		.sidebar-indented {
+			padding-left: 16px;
+		}
+		.sidebar-empty {
+			color: var(--vscode-descriptionForeground);
+		}
+		.sidebar-section {
+			margin: 16px 0 4px;
+			font-size: 11px;
+			text-transform: uppercase;
+			color: var(--vscode-descriptionForeground);
+		}
 		.label {
 			overflow: hidden;
 			white-space: nowrap;
@@ -151,6 +279,7 @@ function buildHtml(scriptUri: vscode.Uri): string {
 </head>
 <body>
 	<div id="world"></div>
+	<aside id="sidebar"></aside>
 	<script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;
