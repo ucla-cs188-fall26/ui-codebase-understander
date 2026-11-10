@@ -9,10 +9,11 @@ import { defaultLayout, GAP } from '../layout/defaultLayout';
 import { arrowPath, chooseSides, placeArrows } from '../layout/arrows';
 import { fitCamera, MAX_SCALE, zoomAt } from '../layout/camera';
 import { boundsOf } from '../layout/geometry';
-import { arrangeChildren, boxSize, buildGraphInfo, childOrigin, closeNode, createLayoutState, GraphInfo, moveTo, openNode, resetNode } from '../layout/state';
-import { arrowZIndex, boxZIndexes, placeBoxes, visibleEdges } from '../layout/place';
+import { arrangeChildren, arrangeShown, boxSize, changeSize, buildGraphInfo, childOrigin, closeNode, createLayoutState, defaultSize, GraphInfo, LayoutState, moveTo, openNode, resetNode, resizeTo } from '../layout/state';
+import { arrowZIndex, boxZIndexes, placeBoxes, placeStrips, stripId, visibleEdges } from '../layout/place';
 import { fromSaved, toSaved } from '../layout/saved';
-import { settleDrop } from '../layout/drop';
+import { dropAt, settleDrop } from '../layout/drop';
+import { minSquishHeight, minSquishWidth, squishHorizontally, squishVertically } from '../layout/squish';
 import { nodeSize } from '../layout/size';
 import { Edge, ROOT_ID } from '../graph/types';
 import { CHILD_LIMIT, getVisibleNodes } from '../layout/visibility';
@@ -489,7 +490,7 @@ suite('layout state', () => {
 
 		// what dragging will do
 		state.homes.set('src/a.ts', { x: 500, y: 500 });
-		closeNode(state, 'src');
+		closeNode(state, info, 'src');
 		openNode(state, info, 'src');
 
 		assert.deepStrictEqual(state.homes.get('src/a.ts'), { x: 500, y: 500 });
@@ -534,30 +535,36 @@ suite('layout state', () => {
 	test('the root stays open', () => {
 		const state = createLayoutState();
 
-		closeNode(state, ROOT_ID);
+		closeNode(state, makeInfo(), ROOT_ID);
 
 		assert.ok(state.expanded.has(ROOT_ID));
 	});
 });
 
-suite('arrangeChildren', () => {
-	// p holds a 2×2 block of 100×50 boxes: a top-left, b top-right, c bottom-left, d bottom-right.
-	// a is a directory, so it can open.
+suite('making room when a box changes size', () => {
+	// p holds a 2×2 block at their default sizes, spaced far enough apart that none touch:
+	// a top-left, b top-right, c bottom-left, d bottom-right. a is a directory, so it can open.
 	function makeBlock() {
 		const nodes = buildTree('repo', ['p/a/x.ts', 'p/b.ts', 'p/c.ts', 'p/d.ts']);
 		const info = buildGraphInfo({ nodes: nodes, edges: [] });
 		const state = createLayoutState();
-		const homes: [string, { x: number; y: number }][] = [
-			['p/a', { x: 0, y: 0 }],
-			['p/b.ts', { x: 200, y: 0 }],
-			['p/c.ts', { x: 0, y: 100 }],
-			['p/d.ts', { x: 200, y: 100 }],
-		];
-		for (const [id, home] of homes) {
-			state.homes.set(id, home);
-			state.closedSizes.set(id, { width: 100, height: 50 });
-		}
+		state.homes.set('p/a', { x: 0, y: 0 });
+		state.homes.set('p/b.ts', { x: 400, y: 0 });
+		state.homes.set('p/c.ts', { x: 0, y: 200 });
+		state.homes.set('p/d.ts', { x: 400, y: 200 });
 		return { info: info, state: state };
+	}
+
+	// where a box ended up, without its size
+	function positionOf(arranged: Map<string, { x: number; y: number }>, id: string) {
+		const rect = arranged.get(id)!;
+		return { x: rect.x, y: rect.y };
+	}
+
+	// a's size 100 wider and 50 taller than its default
+	function grownSize(info: GraphInfo) {
+		const original = defaultSize(info, 'p/a');
+		return { width: original.width + 100, height: original.height + 50 };
 	}
 
 	test('leaves everything at home when nothing has grown', () => {
@@ -565,34 +572,64 @@ suite('arrangeChildren', () => {
 
 		const arranged = arrangeChildren(state, info, 'p');
 
-		assert.deepStrictEqual(arranged.get('p/a'), { x: 0, y: 0, width: 100, height: 50 });
-		assert.deepStrictEqual(arranged.get('p/d.ts'), { x: 200, y: 100, width: 100, height: 50 });
+		assert.deepStrictEqual(positionOf(arranged, 'p/a'), { x: 0, y: 0 });
+		assert.deepStrictEqual(positionOf(arranged, 'p/d.ts'), { x: 400, y: 200 });
 	});
 
-	test('shifts boxes past a grown box right, down, or both, keeping their places', () => {
+	// opens a at its grown size, the way opening and resizing go through changeSize
+	function openGrown(state: LayoutState, info: GraphInfo) {
+		function open() {
+			state.expanded.add('p/a');
+			state.openSizes.set('p/a', grownSize(info));
+		}
+		changeSize(state, info, 'p/a', open);
+	}
+
+	test('moves boxes past a growing box right, down, or both, by exactly the growth', () => {
 		const { info, state } = makeBlock();
 
-		// a opens 100 wider and 50 taller than its closed size
-		state.expanded.add('p/a');
-		state.openSizes.set('p/a', { width: 200, height: 100 });
+		openGrown(state, info);
 		const arranged = arrangeChildren(state, info, 'p');
 
-		assert.deepStrictEqual(arranged.get('p/b.ts'), { x: 300, y: 0, width: 100, height: 50 });
-		assert.deepStrictEqual(arranged.get('p/c.ts'), { x: 0, y: 150, width: 100, height: 50 });
-		assert.deepStrictEqual(arranged.get('p/d.ts'), { x: 300, y: 150, width: 100, height: 50 });
+		assert.deepStrictEqual(positionOf(arranged, 'p/b.ts'), { x: 500, y: 0 });
+		assert.deepStrictEqual(positionOf(arranged, 'p/c.ts'), { x: 0, y: 250 });
+		assert.deepStrictEqual(positionOf(arranged, 'p/d.ts'), { x: 500, y: 250 });
 	});
 
-	test('puts everything back home when the grown box closes', () => {
+	test('moves boxes past a closed box the user resizes bigger', () => {
 		const { info, state } = makeBlock();
-		state.expanded.add('p/a');
-		state.openSizes.set('p/a', { width: 200, height: 100 });
 
-		closeNode(state, 'p/a');
+		resizeTo(state, info, 'p/a', grownSize(info));
 		const arranged = arrangeChildren(state, info, 'p');
 
-		assert.deepStrictEqual(arranged.get('p/b.ts'), { x: 200, y: 0, width: 100, height: 50 });
-		assert.deepStrictEqual(arranged.get('p/c.ts'), { x: 0, y: 100, width: 100, height: 50 });
-		assert.deepStrictEqual(arranged.get('p/d.ts'), { x: 200, y: 100, width: 100, height: 50 });
+		assert.deepStrictEqual(positionOf(arranged, 'p/b.ts'), { x: 500, y: 0 });
+		assert.deepStrictEqual(positionOf(arranged, 'p/d.ts'), { x: 500, y: 250 });
+	});
+
+	test('moves everything back when the grown box closes', () => {
+		const { info, state } = makeBlock();
+		openGrown(state, info);
+
+		closeNode(state, info, 'p/a');
+		const arranged = arrangeChildren(state, info, 'p');
+
+		assert.deepStrictEqual(positionOf(arranged, 'p/b.ts'), { x: 400, y: 0 });
+		assert.deepStrictEqual(positionOf(arranged, 'p/c.ts'), { x: 0, y: 200 });
+		assert.deepStrictEqual(positionOf(arranged, 'p/d.ts'), { x: 400, y: 200 });
+	});
+
+	test('moves nothing when a box is dragged away, since there\'s no leftover shift', () => {
+		const { info, state } = makeBlock();
+		openGrown(state, info);
+		const before = arrangeChildren(state, info, 'p');
+
+		// drag the grown a far below everything
+		dropAt(state, info, 'p/a', { x: 0, y: 2000 });
+
+		const after = arrangeChildren(state, info, 'p');
+		for (const id of ['p/b.ts', 'p/c.ts', 'p/d.ts']) {
+			assert.deepStrictEqual(positionOf(after, id), positionOf(before, id));
+		}
 	});
 });
 
@@ -697,6 +734,75 @@ suite('settleDrop', () => {
 		assert.deepStrictEqual(state.homes.get('d/b.ts'), { x: 0, y: 50 + GAP });
 	});
 
+	test('grows a directory the user sized, when a child is dropped past its edge', () => {
+		const info = makeInfo();
+		const state = createLayoutState();
+		openNode(state, info, ROOT_ID);
+		openNode(state, info, 'src');
+		resizeTo(state, info, 'src', boxSize(state, info, 'src'));
+		const before = boxSize(state, info, 'src');
+
+		moveTo(state, info, 'src/a.ts', { x: 2000, y: 0 });
+		settleDrop(state, info, 'src/a.ts');
+
+		assert.ok(boxSize(state, info, 'src').width > before.width);
+	});
+
+	test('keeps a squished directory squished when a child is dropped inside it', () => {
+		// seven files in one column, squished from below until only 3 show
+		const paths: string[] = [];
+		for (let i = 1; i <= 7; i++) {
+			paths.push('p/f' + i + '.ts');
+		}
+		const info = buildGraphInfo({ nodes: buildTree('repo', paths), edges: [] });
+		const state = createLayoutState();
+		openNode(state, info, ROOT_ID);
+		openNode(state, info, 'p');
+		resizeTo(state, info, 'p', { width: boxSize(state, info, 'p').width, height: 0 });
+		const before = boxSize(state, info, 'p');
+
+		// pick up each shown file and drop it right where it's drawn, the way dragging does
+		for (const [id, drawn] of arrangeShown(state, info, 'p').rects) {
+			dropAt(state, info, id, drawn);
+		}
+
+		assert.deepStrictEqual(boxSize(state, info, 'p'), before);
+	});
+
+	test('lands a box exactly where it was dropped, even past a sibling that has grown', () => {
+		// a has grown wide; nothing is shifted after the fact, so where b is dropped is where it's drawn
+		const nodes = buildTree('repo', ['p/a/x.ts', 'p/b.ts']);
+		const info = buildGraphInfo({ nodes: nodes, edges: [] });
+		const state = createLayoutState();
+		state.expanded.add('p');
+		state.homes.set('p/a', { x: 0, y: 0 });
+		state.homes.set('p/b.ts', { x: 0, y: 300 });
+		state.closedSizes.set('p/a', { width: defaultSize(info, 'p/a').width + 500, height: defaultSize(info, 'p/a').height });
+
+		const target = { x: 800, y: 300 };
+		dropAt(state, info, 'p/b.ts', target);
+
+		const drawn = arrangeChildren(state, info, 'p').get('p/b.ts')!;
+		assert.deepStrictEqual({ x: drawn.x, y: drawn.y }, target);
+	});
+
+	test('moves nothing it didn\'t land on, even when the dropped box had grown', () => {
+		// a has grown tall, so b, below it, is drawn shifted down
+		const nodes = buildTree('repo', ['p/a/x.ts', 'p/b.ts']);
+		const info = buildGraphInfo({ nodes: nodes, edges: [] });
+		const state = createLayoutState();
+		state.expanded.add('p');
+		state.homes.set('p/a', { x: 0, y: 0 });
+		state.homes.set('p/b.ts', { x: 0, y: 200 });
+		state.closedSizes.set('p/a', { width: defaultSize(info, 'p/a').width, height: defaultSize(info, 'p/a').height + 300 });
+		const bBefore = arrangeChildren(state, info, 'p').get('p/b.ts')!;
+
+		// drag a far to the right, away from b
+		dropAt(state, info, 'p/a', { x: 2000, y: 0 });
+
+		assert.deepStrictEqual(arrangeChildren(state, info, 'p').get('p/b.ts'), bBefore);
+	});
+
 	test('pushes along a chain: what gets pushed pushes what it hits', () => {
 		const { info, state } = makeBoxes([
 			['a.ts', { x: 150, y: 0 }],
@@ -709,6 +815,217 @@ suite('settleDrop', () => {
 		// b goes to 290, which runs into c, so c goes GAP past b's new right edge at 390
 		assert.deepStrictEqual(state.homes.get('b.ts'), { x: 290, y: 0 });
 		assert.deepStrictEqual(state.homes.get('c.ts'), { x: 390 + GAP, y: 0 });
+	});
+});
+
+suite('resizeTo', () => {
+	test('stores open and closed sizes apart, and never goes below the minimum', () => {
+		const info = makeInfo();
+		const state = createLayoutState();
+
+		resizeTo(state, info, 'src/a.ts', { width: 300, height: 90 });
+		assert.deepStrictEqual(state.closedSizes.get('src/a.ts'), { width: 300, height: 90 });
+
+		// an open box stops where its rows and columns are packed tight with at least 3 boxes each, plus its padding
+		// and title; childOrigin's x is the padding
+		openNode(state, info, 'src');
+		resizeTo(state, info, 'src', { width: 10, height: 10 });
+		const children = arrangeChildren(state, info, 'src');
+		const origin = childOrigin();
+		assert.deepStrictEqual(state.openSizes.get('src'), {
+			width: origin.x + minSquishWidth(children) + origin.x,
+			height: origin.y + minSquishHeight(children) + origin.x,
+		});
+		assert.ok(!state.closedSizes.has('src'));
+	});
+});
+
+suite('arrangeShown', () => {
+	// a directory with seven files: five get boxes, two start behind the right strip
+	function makeSeven() {
+		const paths: string[] = [];
+		for (let i = 1; i <= 7; i++) {
+			paths.push('p/f' + i + '.ts');
+		}
+		const info = buildGraphInfo({ nodes: buildTree('repo', paths), edges: [] });
+		const state = createLayoutState();
+		openNode(state, info, ROOT_ID);
+		openNode(state, info, 'p');
+		return { info: info, state: state };
+	}
+
+	test('puts children past the limit behind the right strip', () => {
+		const { info, state } = makeSeven();
+
+		const shown = arrangeShown(state, info, 'p');
+
+		assert.strictEqual(shown.rects.size, 5);
+		assert.strictEqual(shown.hiddenRight.length, 2);
+		assert.deepStrictEqual(shown.hiddenBottom, []);
+	});
+
+	test('hides more when the user makes the directory smaller than its children need', () => {
+		const { info, state } = makeSeven();
+		const fits = boxSize(state, info, 'p');
+
+		// the five shown files stack in one column, so shrinking from below hides the lowest ones, down to 3
+		resizeTo(state, info, 'p', { width: fits.width, height: 0 });
+		const shown = arrangeShown(state, info, 'p');
+
+		assert.strictEqual(shown.rects.size, 3);
+		assert.strictEqual(shown.hiddenBottom.length, 2);
+	});
+});
+
+suite('resizing inside a directory', () => {
+	test('grows a directory the user sized, when a child is made bigger than it', () => {
+		const info = makeInfo();
+		const state = createLayoutState();
+		openNode(state, info, ROOT_ID);
+		openNode(state, info, 'src');
+		resizeTo(state, info, 'src', boxSize(state, info, 'src'));
+		const before = boxSize(state, info, 'src');
+
+		resizeTo(state, info, 'src/a.ts', { width: 100, height: 2000 });
+
+		assert.ok(boxSize(state, info, 'src').height > before.height);
+	});
+});
+
+suite('squishHorizontally', () => {
+	// one row of 100×50 boxes, 40 apart: a at 0, b at 140, c at 280, d at 420; and e alone in a row below
+	function makeRow() {
+		return new Map([
+			['a', { x: 0, y: 0, width: 100, height: 50 }],
+			['b', { x: 140, y: 0, width: 100, height: 50 }],
+			['c', { x: 280, y: 0, width: 100, height: 50 }],
+			['d', { x: 420, y: 0, width: 100, height: 50 }],
+			['e', { x: 0, y: 200, width: 100, height: 50 }],
+		]);
+	}
+
+	function xOf(rects: Map<string, { x: number }>, id: string): number {
+		return rects.get(id)!.x;
+	}
+
+	test('leaves everything in place when there is room', () => {
+		const squished = squishHorizontally(makeRow(), 520);
+
+		assert.deepStrictEqual(squished.rects, makeRow());
+		assert.deepStrictEqual(squished.hidden, []);
+	});
+
+	test('shrinks every gap in a row evenly, keeping the order', () => {
+		const squished = squishHorizontally(makeRow(), 480);
+
+		// the three 40px gaps shrink together until d ends at the wall: 480 - 4 × 100 = 80 left, so 80 / 3 each
+		const gapAB = xOf(squished.rects, 'b') - xOf(squished.rects, 'a') - 100;
+		const gapBC = xOf(squished.rects, 'c') - xOf(squished.rects, 'b') - 100;
+		const gapCD = xOf(squished.rects, 'd') - xOf(squished.rects, 'c') - 100;
+		assert.ok(Math.abs(gapAB - 80 / 3) < 0.001);
+		assert.ok(Math.abs(gapBC - gapAB) < 0.001);
+		assert.ok(Math.abs(gapCD - gapAB) < 0.001);
+		assert.ok(Math.abs(xOf(squished.rects, 'd') + 100 - 480) < 0.001);
+	});
+
+	test('hides the latest box in a row that is packed tight and still doesn\'t fit', () => {
+		const squished = squishHorizontally(makeRow(), 400);
+
+		// four boxes need at least 4 × 100 + 3 × 10 = 430, so d goes, and the other three fit back at home
+		assert.deepStrictEqual(squished.hidden, ['d']);
+		assert.strictEqual(xOf(squished.rects, 'c'), 280);
+		assert.ok(!squished.rects.has('d'));
+	});
+
+	test('leaves other rows alone', () => {
+		const squished = squishHorizontally(makeRow(), 400);
+
+		assert.strictEqual(xOf(squished.rects, 'e'), 0);
+		assert.ok(!squished.hidden.includes('e'));
+	});
+
+	test('never slides boxes onto each other in a staggered row', () => {
+		// api overlaps db and config top to bottom, so all four count as one row; db and error sit above config
+		const staggered = new Map([
+			['api', { x: 0, y: 60, width: 300, height: 100 }],
+			['db', { x: 330, y: 0, width: 300, height: 100 }],
+			['config', { x: 600, y: 110, width: 260, height: 80 }],
+			['error', { x: 640, y: 0, width: 260, height: 90 }],
+		]);
+
+		const squished = squishHorizontally(staggered, 860);
+
+		for (const [idA, a] of squished.rects) {
+			for (const [idB, b] of squished.rects) {
+				if (idA < idB) {
+					const overlap = a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+					assert.ok(!overlap, idA + ' and ' + idB + ' overlap');
+				}
+			}
+		}
+	});
+
+	test('counts stacked boxes as one column, so a staggered row keeps all three columns', () => {
+		// api, then db above audit, then error above config: five boxes, three columns
+		const staggered = new Map([
+			['api', { x: 0, y: 60, width: 400, height: 100 }],
+			['db', { x: 450, y: 0, width: 400, height: 100 }],
+			['audit', { x: 450, y: 130, width: 310, height: 80 }],
+			['error', { x: 900, y: 0, width: 300, height: 90 }],
+			['config', { x: 900, y: 120, width: 280, height: 80 }],
+		]);
+
+		// as narrow as allowed: the three columns side by side, each as wide as its widest box
+		const narrowest = minSquishWidth(staggered);
+		assert.strictEqual(narrowest, 400 + 400 + 300 + 2 * 10);
+
+		const squished = squishHorizontally(staggered, narrowest);
+		assert.deepStrictEqual(squished.hidden, []);
+		assert.strictEqual(squished.rects.size, 5);
+	});
+
+	test('keeps at least 3 boxes in a row', () => {
+		// three boxes need 320; at 300 the row of four can lose d, but then it's down to 3 and can't lose more
+		const squished = squishHorizontally(makeRow(), 300);
+
+		assert.deepStrictEqual(squished.hidden, ['d']);
+		assert.strictEqual(squished.fits, false);
+	});
+
+	test('finds the narrowest width where every row still fits with at least 3 boxes', () => {
+		// the long row's first three: 3 × 100 + 2 × 10
+		assert.strictEqual(minSquishWidth(makeRow()), 320);
+		assert.strictEqual(squishHorizontally(makeRow(), 320).fits, true);
+	});
+});
+
+suite('squishVertically', () => {
+	// one column of 100×50 boxes, 40 apart: a at 0, b at 90, c at 180, d at 270
+	function makeColumn() {
+		return new Map([
+			['a', { x: 0, y: 0, width: 100, height: 50 }],
+			['b', { x: 0, y: 90, width: 100, height: 50 }],
+			['c', { x: 0, y: 180, width: 100, height: 50 }],
+			['d', { x: 0, y: 270, width: 100, height: 50 }],
+		]);
+	}
+
+	test('shrinks gaps evenly from the bottom, then hides the lowest box', () => {
+		// 310 - 4 × 50 = 110 left for the three gaps, so 110 / 3 each, and d ends at the bottom
+		const squeezed = squishVertically(makeColumn(), 310);
+		const gapAB = squeezed.rects.get('b')!.y - squeezed.rects.get('a')!.y - 50;
+		const gapCD = squeezed.rects.get('d')!.y - squeezed.rects.get('c')!.y - 50;
+		assert.ok(Math.abs(gapAB - 110 / 3) < 0.001);
+		assert.ok(Math.abs(gapCD - gapAB) < 0.001);
+		assert.ok(Math.abs(squeezed.rects.get('d')!.y + 50 - 310) < 0.001);
+
+		// four need 4 × 50 + 3 × 10 = 230, so at 220 the lowest goes
+		const jammed = squishVertically(makeColumn(), 220);
+		assert.deepStrictEqual(jammed.hidden, ['d']);
+	});
+
+	test('finds the shortest height where every column still fits with at least 3 boxes', () => {
+		assert.strictEqual(minSquishHeight(makeColumn()), 3 * 50 + 2 * 10);
 	});
 });
 
@@ -822,6 +1139,125 @@ suite('saving the layout', () => {
 
 		assert.ok(!restored.state.expanded.has('deleted'));
 		assert.ok(!restored.state.homes.has('deleted/file.ts'));
+	});
+});
+
+suite('placeStrips', () => {
+	// seven files, either inside p or at the top level; five get boxes and two start behind the right strip
+	function makeSeven(directory: string) {
+		const paths: string[] = [];
+		for (let i = 1; i <= 7; i++) {
+			paths.push(directory + 'f' + i + '.ts');
+		}
+		const info = buildGraphInfo({ nodes: buildTree('repo', paths), edges: [] });
+		const state = createLayoutState();
+		openNode(state, info, ROOT_ID);
+		if (directory !== '') {
+			openNode(state, info, 'p');
+		}
+		return { info: info, state: state };
+	}
+
+	// the children p shows, as page rects
+	function childRects(rects: Map<string, { x: number; y: number; width: number; height: number }>) {
+		const children = [];
+		for (const [id, rect] of rects) {
+			if (id.startsWith('p/')) {
+				children.push(rect);
+			}
+		}
+		return children;
+	}
+
+	test('puts a right strip inside the box for children past the limit, with even padding', () => {
+		const { info, state } = makeSeven('p/');
+		const rects = placeBoxes(state, info, { x: 0, y: 0 });
+
+		const strips = placeStrips(state, info, rects).filter(function isP(strip) {
+			return strip.ownerId === 'p';
+		});
+
+		assert.strictEqual(strips.length, 1);
+		assert.strictEqual(strips[0].side, 'right');
+		assert.strictEqual(strips[0].hiddenIds.length, 2);
+
+		// one padding in from the box's right edge, and every child at least one padding before the strip
+		const box = rects.get('p')!;
+		const padding = childOrigin().x;
+		assert.strictEqual(strips[0].rect.x + strips[0].rect.width, box.x + box.width - padding);
+		for (const child of childRects(rects)) {
+			assert.ok(child.x + child.width <= strips[0].rect.x - padding);
+		}
+	});
+
+	test('puts a bottom strip inside the box when squished from below, with even padding', () => {
+		const { info, state } = makeSeven('p/');
+		resizeTo(state, info, 'p', { width: boxSize(state, info, 'p').width, height: 0 });
+		const rects = placeBoxes(state, info, { x: 0, y: 0 });
+
+		const bottom = placeStrips(state, info, rects).find(function isBottom(strip) {
+			return strip.side === 'bottom';
+		})!;
+
+		assert.strictEqual(bottom.hiddenIds.length, 2);
+		const box = rects.get('p')!;
+		const padding = childOrigin().x;
+		assert.strictEqual(bottom.rect.y + bottom.rect.height, box.y + box.height - padding);
+		for (const child of childRects(rects)) {
+			assert.ok(child.y + child.height <= bottom.rect.y - padding);
+		}
+	});
+
+	test('shows every top-level node in the flow, and only 5 of the rest, with a strip below for them', () => {
+		// a imports b; seven other files import nothing and nothing imports them
+		const paths = ['a.ts', 'b.ts'];
+		for (let i = 1; i <= 7; i++) {
+			paths.push('u' + i + '.txt');
+		}
+		const info = buildGraphInfo({ nodes: buildTree('repo', paths), edges: [edge('a.ts', 'b.ts')] });
+		const state = createLayoutState();
+		openNode(state, info, ROOT_ID);
+		const rects = placeBoxes(state, info, { x: 0, y: 0 });
+
+		assert.ok(rects.has('a.ts') && rects.has('b.ts'));
+		assert.strictEqual(rects.size, 2 + 5);
+
+		const strips = placeStrips(state, info, rects);
+		assert.strictEqual(strips.length, 1);
+		assert.strictEqual(strips[0].ownerId, ROOT_ID);
+		assert.strictEqual(strips[0].side, 'bottom');
+		assert.strictEqual(strips[0].hiddenIds.length, 2);
+		for (const rect of rects.values()) {
+			assert.ok(strips[0].rect.y > rect.y + rect.height);
+		}
+	});
+
+	test('ends an arrow to a hidden file at the strip hiding it, painted above the strip\'s box', () => {
+		// f7 imports f1, which makes f1 the most important; the rest sort by name, so f6 and f7 stay hidden
+		const paths: string[] = [];
+		for (let i = 1; i <= 7; i++) {
+			paths.push('p/f' + i + '.ts');
+		}
+		const info = buildGraphInfo({ nodes: buildTree('repo', paths), edges: [edge('p/f7.ts', 'p/f1.ts')] });
+		const state = createLayoutState();
+		openNode(state, info, ROOT_ID);
+		openNode(state, info, 'p');
+		const rects = placeBoxes(state, info, { x: 0, y: 0 });
+
+		const edges = visibleEdges(state, info, rects, placeStrips(state, info, rects));
+
+		assert.deepStrictEqual(edges, [edge(stripId('p', 'right'), 'p/f1.ts')]);
+		const boxZ = boxZIndexes(rects);
+		assert.strictEqual(arrowZIndex(edges[0], state, info, boxZ), boxZ.get('p')! + 1);
+	});
+
+	test('makes no strips when nothing is hidden', () => {
+		const info = makeInfo();
+		const state = createLayoutState();
+		openNode(state, info, ROOT_ID);
+		openNode(state, info, 'src');
+
+		assert.deepStrictEqual(placeStrips(state, info, placeBoxes(state, info, { x: 0, y: 0 })), []);
 	});
 });
 

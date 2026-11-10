@@ -2,16 +2,14 @@ import { NodeKind, ROOT_ID } from '../graph/types';
 import { ExtensionToWebview, WebviewToExtension } from '../messages';
 import { connections, isInside } from '../analysis/edges';
 import { getLineage, groupByParent } from '../analysis/lookups';
-import { GAP } from '../layout/defaultLayout';
 import { Arrow, arrowPath, placeArrows } from '../layout/arrows';
 import { Camera, fitCamera, zoomAt } from '../layout/camera';
-import { nodeSize } from '../layout/size';
-import { boundsOf, Position, Rect } from '../layout/geometry';
-import { buildGraphInfo, closeNode, createLayoutState, GraphInfo, layOutChildren, LayoutState, moveTo, openNode, resetNode, shownChildren } from '../layout/state';
+import { boundsOf, Position, Rect, Size } from '../layout/geometry';
+import { arrangeShown, boxSize, buildGraphInfo, closeNode, createLayoutState, GraphInfo, layOutChildren, LayoutState, openNode, resetNode, resizeTo } from '../layout/state';
 import { fromSaved, toSaved } from '../layout/saved';
-import { settleDrop } from '../layout/drop';
-import { makeCloseIcon, makeFitIcon, makeGripIcon, makeOpenIcon, makeResetIcon, SVG_NS } from './icons';
-import { arrowZIndex, boxZIndexes, placeBoxes, visibleEdges } from '../layout/place';
+import { dropAt } from '../layout/drop';
+import { makeCloseIcon, makeFitIcon, makeGripIcon, makeOpenIcon, makeResetIcon, makeResizeIcon, SVG_NS } from './icons';
+import { arrowZIndex, boxZIndexes, nodeOfEnd, placeBoxes, placeStrips, Strip, visibleEdges } from '../layout/place';
 
 // VS Code provides this once per webview; calling it a second time throws
 declare function acquireVsCodeApi(): { postMessage(message: WebviewToExtension): void };
@@ -27,7 +25,7 @@ const DRAG_RAISE = 100000;
 /**
  * Makes one box element.
  * @param label The text inside the box.
- * @param kind A class for styling: 'repo', 'directory', 'file', or 'more'.
+ * @param kind A class for styling: 'repo', 'directory', or 'file'.
  * @param x The left edge, in pixels.
  * @param y The top edge, in pixels.
  * @param width The width, in pixels.
@@ -101,14 +99,53 @@ function makeArrow(arrow: Arrow, zIndex: number): SVGSVGElement {
 }
 
 /**
- * Counts the children a box keeps behind "+N more".
- * @param info The graph lookups.
- * @param id The box.
- * @returns How many of its children have no box of their own.
+ * While dragging, checks whether an arrow ends somewhere the dragged box is covering, so it would point at
+ * something hidden. An arrow on the uncovered side of a partly covered box is fine.
+ * @param arrow The placed arrow.
+ * @param rects Every box's rect, with the dragged box already moved by the drag.
+ * @returns True if either end is under the dragged box but not part of it; always false when nothing is dragged.
  */
-function hiddenCount(info: GraphInfo, id: string): number {
-	const children = info.childrenById.get(id) ?? [];
-	return children.length - shownChildren(info, id).length;
+function endsUnderDraggedBox(arrow: Arrow, rects: Map<string, Rect>): boolean {
+	if (!isDragging || drag === undefined || info === undefined) {
+		return false;
+	}
+
+	const dragged = rects.get(drag.id)!;
+	function isUnderDraggedBox(point: Position): boolean {
+		return point.x > dragged.x && point.x < dragged.x + dragged.width && point.y > dragged.y && point.y < dragged.y + dragged.height;
+	}
+
+	// an end that belongs to the dragged box (or something in it, strips included) moves with it, so it's never
+	// hidden by it
+	const startHidden = !isInside(nodeOfEnd(arrow.from), drag.id, info.nodesById) && isUnderDraggedBox(arrow.start);
+	const endHidden = !isInside(nodeOfEnd(arrow.to), drag.id, info.nodesById) && isUnderDraggedBox(arrow.end);
+	return startHidden || endHidden;
+}
+
+/**
+ * Makes one "+N" strip, standing in for the children its box is hiding on that side.
+ * @param strip The strip, from placeStrips.
+ * @param zIndex How high it paints: just above its box.
+ * @returns The element.
+ */
+function makeStrip(strip: Strip, zIndex: number): HTMLElement {
+	const element = document.createElement('div');
+	element.className = 'strip strip-' + strip.side;
+	element.style.left = strip.rect.x + 'px';
+	element.style.top = strip.rect.y + 'px';
+	element.style.width = strip.rect.width + 'px';
+	element.style.height = strip.rect.height + 'px';
+	element.style.zIndex = String(zIndex);
+	element.textContent = '+' + strip.hiddenIds.length;
+
+	// the hidden names on hover
+	const names: string[] = [];
+	for (const id of strip.hiddenIds) {
+		names.push(info!.nodesById.get(id)!.name);
+	}
+	element.title = names.join('\n');
+
+	return element;
 }
 
 /**
@@ -120,6 +157,15 @@ function drawGraph(): void {
 	}
 
 	const rects = placeBoxes(state, info, { x: START_X, y: START_Y });
+
+	// while dragging, draw the box and everything inside it moved by the drag so far; its home hasn't changed yet
+	if (isDragging && drag !== undefined) {
+		for (const [id, rect] of rects) {
+			if (isInside(id, drag.id, info.nodesById)) {
+				rects.set(id, { x: rect.x + dragOffset.x, y: rect.y + dragOffset.y, width: rect.width, height: rect.height });
+			}
+		}
+	}
 	lastRects = rects;
 
 	const world = document.getElementById('world')!;
@@ -137,9 +183,23 @@ function drawGraph(): void {
 		}
 	}
 	world.appendChild(makeArrowheadDefs());
-	const edges = visibleEdges(state, info, rects);
-	const arrows = placeArrows(edges, rects);
+
+	// strips stand in for hidden children; arrows to those end at the strip, so it goes in with the box rects
+	const strips = placeStrips(state, info, rects);
+	const arrowRects = new Map(rects);
+	for (const strip of strips) {
+		arrowRects.set(strip.id, strip.rect);
+		world.appendChild(makeStrip(strip, (boxZ.get(strip.ownerId) ?? 0) + 1));
+	}
+
+	const edges = visibleEdges(state, info, rects, strips);
+	const arrows = placeArrows(edges, arrowRects);
 	for (let i = 0; i < arrows.length; i++) {
+		// while dragging, an arrow ending under the dragged box would point at something hidden
+		if (endsUnderDraggedBox(arrows[i], rects)) {
+			continue;
+		}
+
 		// placeArrows keeps the edges' order, so arrows[i] belongs to edges[i]
 		world.appendChild(makeArrow(arrows[i], arrowZIndex(edges[i], state, info, boxZ)));
 	}
@@ -147,16 +207,8 @@ function drawGraph(): void {
 	for (const [id, rect] of rects) {
 		const node = info.nodesById.get(id)!;
 		const isOpen = state.expanded.has(id);
-
-		// an open box shows how many children it is hiding next to its name
-		let label = node.name;
-		const hidden = hiddenCount(info, id);
-		if (isOpen && hidden > 0) {
-			label += ' · +' + hidden + ' more';
-		}
-
 		const kind = isOpen ? node.kind + ' open' : node.kind;
-		const box = makeBox(label, kind, rect.x, rect.y, rect.width, rect.height);
+		const box = makeBox(node.name, kind, rect.x, rect.y, rect.width, rect.height);
 
 		// so a click can tell which node it landed on
 		box.dataset.id = id;
@@ -180,19 +232,15 @@ function drawGraph(): void {
 		grip.appendChild(makeGripIcon());
 		box.querySelector('.box-title')!.appendChild(grip);
 
-		world.appendChild(box);
-	}
-
-	// the root has no box to show a count in, so its "+N more" sits below everything
-	const rootHidden = hiddenCount(info, ROOT_ID);
-	if (rootHidden > 0) {
-		let bottom = START_Y;
-		for (const rect of rects.values()) {
-			bottom = Math.max(bottom, rect.y + rect.height);
+		// only the selected box can be resized, the same as moving
+		if (id === selectedId) {
+			const handle = document.createElement('span');
+			handle.className = 'resize-handle';
+			handle.appendChild(makeResizeIcon());
+			box.appendChild(handle);
 		}
 
-		const size = nodeSize(0, 0);
-		world.appendChild(makeBox('+' + rootHidden + ' more', 'more', START_X, bottom + GAP, size.width, size.height));
+		world.appendChild(box);
 	}
 
 	// keep the sidebar in step with the selection
@@ -693,9 +741,19 @@ function handlePointerDown(event: PointerEvent): void {
 		return;
 	}
 
+	// the corner handle resizes; checked first, since it sits on the box's grab area
+	if (target.closest('.resize-handle') !== null && selectedId !== undefined && info !== undefined) {
+		resize = { id: selectedId, startSize: boxSize(state, info, selectedId), startMouse: pressStart };
+		return;
+	}
+
 	// the selected box's grab area moves the box; anywhere else may become a pan
 	if (isOnGrabArea(target) && selectedId !== undefined) {
-		drag = { id: selectedId, startHome: state.homes.get(selectedId)!, startMouse: pressStart };
+		// where it's drawn among its siblings, which isn't its home when a sibling has grown or the directory is
+		// squished; the drop works from this, so the box lands where it was let go
+		const parentId = info!.nodesById.get(selectedId)!.parent!;
+		const drawn = arrangeShown(state, info!, parentId).rects.get(selectedId)!;
+		drag = { id: selectedId, startDrawn: { x: drawn.x, y: drawn.y }, startMouse: pressStart };
 		return;
 	}
 
@@ -707,6 +765,11 @@ function handlePointerDown(event: PointerEvent): void {
  * @param event The browser's pointer event.
  */
 function handlePointerMove(event: PointerEvent): void {
+	if (resize !== undefined) {
+		resizeBox(event);
+		return;
+	}
+
 	if (drag !== undefined) {
 		moveDraggedBox(event);
 		return;
@@ -742,23 +805,77 @@ function handlePointerUp(): void {
 	isPanning = false;
 	document.body.classList.remove('panning');
 
+	// the size was stored as it changed, so this only ends the resize; the last redraw already saved it
+	if (resize !== undefined) {
+		endResize();
+	}
+
 	if (drag !== undefined) {
-		const droppedId = drag.id;
+		const dropped = drag;
 		const wasDragging = isDragging;
 		drag = undefined;
 		isDragging = false;
 		document.body.classList.remove('dragging');
 
-		// push what it landed on out of the way, then redraw in the normal paint order, which also saves
+		// now the home moves, once; then what it landed on is pushed out of the way, and a redraw in the normal paint
+		// order also saves
 		if (wasDragging && info !== undefined) {
-			settleDrop(state, info, droppedId);
+			const target = { x: dropped.startDrawn.x + dragOffset.x, y: dropped.startDrawn.y + dragOffset.y };
+			dropAt(state, info, dropped.id, target);
 			drawGraph();
 		}
+		dragOffset = { x: 0, y: 0 };
 	}
 }
 
-// the box being moved, its home and the mouse when the press started; undefined when no box is pressed
-let drag: { id: string; startHome: Position; startMouse: Position } | undefined = undefined;
+// the box being resized, its size and the mouse when the press started; undefined when no handle is pressed
+let resize: { id: string; startSize: Size; startMouse: Position } | undefined = undefined;
+
+// whether that press has moved far enough to really be resizing, rather than a click
+let isResizing = false;
+
+/**
+ * Resizes the pressed box with the mouse, once the press has moved past CLICK_SLOP. Unlike moving, this changes the
+ * state as it goes, so neighbors follow live by exactly the size change.
+ * @param event The browser's pointer event.
+ */
+function resizeBox(event: PointerEvent): void {
+	if (info === undefined || resize === undefined) {
+		return;
+	}
+
+	const dx = event.clientX - resize.startMouse.x;
+	const dy = event.clientY - resize.startMouse.y;
+
+	if (!isResizing) {
+		if (Math.hypot(dx, dy) <= CLICK_SLOP) {
+			return;
+		}
+		isResizing = true;
+		document.body.setPointerCapture(event.pointerId);
+		document.body.classList.add('resizing');
+	}
+
+	// screen pixels to world pixels, measured from the start so small steps can't add up to drift
+	resizeTo(state, info, resize.id, { width: resize.startSize.width + dx / camera.scale, height: resize.startSize.height + dy / camera.scale });
+	drawGraph();
+}
+
+/**
+ * Ends a resize.
+ */
+function endResize(): void {
+	resize = undefined;
+	isResizing = false;
+	document.body.classList.remove('resizing');
+}
+
+// the box being moved, where it was drawn among its siblings and where the mouse was when the press started;
+// undefined when no box is pressed
+let drag: { id: string; startDrawn: Position; startMouse: Position } | undefined = undefined;
+
+// how far the dragged box has been moved so far, in world pixels; only drawn until the drop
+let dragOffset: Position = { x: 0, y: 0 };
 
 // whether that press has moved far enough to really be dragging, rather than a click
 let isDragging = false;
@@ -788,8 +905,17 @@ function moveDraggedBox(event: PointerEvent): void {
 
 	// screen pixels to world pixels, so the box stays under the mouse at any zoom; measured from the start of the
 	// drag, so small steps can't add up to drift
-	const home = { x: drag.startHome.x + dx / camera.scale, y: drag.startHome.y + dy / camera.scale };
-	moveTo(state, info, drag.id, home);
+	let offsetX = dx / camera.scale;
+	let offsetY = dy / camera.scale;
+
+	// inside a directory, it can't go past the left or top edge, the same limit moveTo keeps on drop
+	if (info.nodesById.get(drag.id)!.parent !== ROOT_ID) {
+		offsetX = Math.max(offsetX, -drag.startDrawn.x);
+		offsetY = Math.max(offsetY, -drag.startDrawn.y);
+	}
+
+	// only the drawing moves; the home changes once, on drop, so nothing else shifts while dragging
+	dragOffset = { x: offsetX, y: offsetY };
 	drawGraph();
 }
 
@@ -818,7 +944,7 @@ function handleClick(event: MouseEvent): void {
 		selectedId = undefined;
 	} else if (target.closest('.chevron') !== null) {
 		if (state.expanded.has(id)) {
-			closeNode(state, id);
+			closeNode(state, info, id);
 			clearSelectionIfClosedAway();
 		} else {
 			openNode(state, info, id);

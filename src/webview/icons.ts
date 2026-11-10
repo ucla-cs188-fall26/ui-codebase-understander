@@ -45,6 +45,14 @@ export function makeGripIcon(): SVGSVGElement {
 }
 
 /**
+ * Draws two short diagonal lines in the bottom-right corner, the usual sign for "drag this corner to resize".
+ * @returns The icon.
+ */
+export function makeResizeIcon(): SVGSVGElement {
+	return makeIcon('M 14 8 L 8 14 M 14 12 L 12 14');
+}
+
+/**
  * Draws four corner brackets, the usual sign for "fit everything in view".
  * @returns The icon.
  */

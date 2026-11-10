@@ -1,7 +1,7 @@
 import { ROOT_ID } from '../graph/types';
 import { GAP } from './defaultLayout';
-import { overlapsWithGap, Rect } from './geometry';
-import { arrangeChildren, GraphInfo, LayoutState } from './state';
+import { overlapsWithGap, Position, Rect } from './geometry';
+import { arrangeChildren, changeSize, GraphInfo, growToFit, LayoutState, moveTo } from './state';
 
 // siblings closer than this count as overlapping; a pushed box moves out to the normal GAP
 const MIN_GAP = 10;
@@ -138,4 +138,24 @@ export function settleDrop(state: LayoutState, info: GraphInfo, droppedId: strin
 			state.homes.set(id, { x: home.x + dx, y: home.y + dy });
 		}
 	}
+
+	// a drop never hides a box: directories the user sized too small for what's in them now grow to fit
+	growToFit(state, info, droppedId);
+}
+
+/**
+ * Drops a box at a spot among its siblings: it lands exactly there (a home is where a box is drawn), nothing it
+ * didn't land on moves, and what it did land on is pushed out of the way. If that makes its directory grow, the
+ * directory's own neighbors make room, the same as any size change.
+ * @param state The view state.
+ * @param info The graph lookups.
+ * @param id The dropped box.
+ * @param target Where it was let go, relative to the inside of its parent.
+ */
+export function dropAt(state: LayoutState, info: GraphInfo, id: string, target: Position): void {
+	function drop(): void {
+		moveTo(state, info, id, target);
+		settleDrop(state, info, id);
+	}
+	changeSize(state, info, id, drop);
 }

@@ -21,23 +21,26 @@ Each rule should become a test.
 - Within a column, boxes are sorted by indegree, then child count, then name.
 - Columns are centered vertically.
 - Padding between boxes is even by default, whatever their sizes.
-- A directory opens at full spacing, showing about 5 children. The rest go behind `+N more`.
+- A directory opens at full spacing, showing about 5 children. The rest go behind a strip on the side the default layout would have put them.
+- At the top level, every node with an arrow in or out gets a box, plus up to 5 of the rest. The others wait in a strip below the top-level boxes.
 - A directory never hides just one child.
 
 ## Size
 
 - A closed box's size comes from `nodeSize(childCount, indegree)`.
-- Children set a directory's size. A strip never makes a directory bigger.
-- A strip matches the directory's current size: top and bottom strips fill its width, and side strips fill its height, minus padding.
+- Children set a directory's size, plus room for any strip.
+- A strip sits inside the directory with the same padding on every side: between it and the edge, and between it and the children. It's drawn as a dotted outline.
+- A strip matches the directory's current size: bottom strips fill its width, and side strips fill its height, minus padding, stopping short of each other in the corner.
 - A directory only reserves room for a strip on a side that has one.
 
 ## Dragging
 
 - Only the selected box can be dragged: by its title strip if it's open, anywhere on it if it's closed. Pressing anywhere else, including unselected boxes and the inside of open directories, pans.
 - A dragged box, with everything inside it, paints on top while dragging. Nothing needs to stay in front afterward, since siblings never overlap once a drop settles.
-- Dragging a box past a directory's edge grows the directory.
+- While dragging, only the dragged box moves; nothing else changes until the drop. Dropping a box past a directory's edge grows the directory.
 - A box touching an edge is holding it out, so dragging it inward pulls the edge in, as far as the other boxes allow.
 - Pushing happens on drop only, never while dragging.
+- A dropped box lands exactly where it was let go, and nothing it didn't land on moves, even when the dropped box had grown and others were shifted to make room for it.
 - On drop, anything underneath moves away from where the dropped box landed (comparing centers), in any direction, and anything it hits moves the same way. The dropped box stays put.
 - A push never moves a box past a directory's left or top edge. If it would, the push goes right or down instead, whichever is shorter.
 - The top level has no border, so boxes there can be dragged and pushed anywhere, in any direction.
@@ -48,10 +51,10 @@ Each rule should become a test.
 - Every box has a resize handle at its lower right.
 - Neighbors follow live, by exactly the size change, so gaps stay the same.
 - A directory can be made bigger than its children and stays that size.
-- Shrinking works like a wall: the edge pushes boxes it touches, and they collide with and push the next ones. Their order never changes.
+- Shrinking squeezes each row (or column, from the bottom) by shrinking all its gaps in the same proportion, so gaps that started even stay even. Boxes keep their size, and their order never changes. Rows don't affect each other.
 - `+N` only appears once a chain is fully squished.
 - When a chain is jammed, only that chain loses a box: its latest in the flow, straight behind a strip.
-- A chain keeps at least 3 boxes. With 3 jammed the directory stops shrinking. With 4 it can shrink to 3 plus `+1`.
+- A row keeps at least 3 columns, where boxes stacked one above another count as one column. With 3 jammed the directory stops shrinking. With 4 it can shrink to 3 plus `+1`.
 - The layout depends only on homes and the directory's size, so growing is the exact reverse of shrinking.
 - Hidden boxes come back squished, then spread out toward home as room appears.
 - Growing in one direction never pulls in boxes hidden in the other direction.
@@ -69,7 +72,7 @@ Each rule should become a test.
 
 - Opening a child grows its parent and never adds to the parent's `+N`.
 - Opening or closing a directory never makes two boxes swap sides.
-- When a box grows, siblings past its original right edge shift right by the growth, and those past its bottom edge shift down, like inserting a row or column. Relative positions and gaps stay exactly the same, and closing it puts everyone back.
+- When a box grows (opening or resizing), siblings past its old right edge move right by the growth, and those past its old bottom edge move down, like inserting a row or column, once, at that moment. Shrinking moves them back by the same amount, so closing a box right after opening it puts everyone back. A box is always drawn where its saved position says, so nothing shifts later on its own.
 
 ## Arrows
 

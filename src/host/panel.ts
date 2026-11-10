@@ -141,6 +141,25 @@ function buildHtml(scriptUri: vscode.Uri): string {
 		body.dragging * {
 			cursor: move;
 		}
+		/* the same while resizing, with the diagonal resize cursor */
+		body.resizing,
+		body.resizing * {
+			cursor: nwse-resize;
+		}
+		/* the selected box's lower-right corner, for resizing it */
+		.resize-handle {
+			position: absolute;
+			right: 0;
+			bottom: 0;
+			display: flex;
+			color: var(--vscode-descriptionForeground);
+			cursor: nwse-resize;
+		}
+		.resize-handle svg {
+			fill: none;
+			stroke: currentColor;
+			stroke-width: 1.5;
+		}
 		#world {
 			position: relative;
 			transform-origin: 0 0;
@@ -246,9 +265,23 @@ function buildHtml(scriptUri: vscode.Uri): string {
 		.box.open {
 			background: var(--vscode-editor-background);
 		}
-		.box.more {
-			border-style: dashed;
+		/* a "+N" bar in a box's padding, standing in for the children hidden on that side */
+		.strip {
+			position: absolute;
+			box-sizing: border-box;
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			overflow: hidden;
+			border-radius: 4px;
+			border: 2px dotted var(--vscode-descriptionForeground);
 			color: var(--vscode-descriptionForeground);
+			font-size: 11px;
+			white-space: nowrap;
+		}
+		/* a right strip is tall and thin, so its count reads top to bottom */
+		.strip-right {
+			writing-mode: vertical-rl;
 		}
 		#sidebar {
 			display: none;
