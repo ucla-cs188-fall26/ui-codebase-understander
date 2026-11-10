@@ -136,6 +136,60 @@ function childrenPastLimit(info: GraphInfo, parentId: string): string[] {
 	return past;
 }
 
+// which side each directory's children past the limit wait on; it depends only on the graph, so it's worked out once
+// per graph and directory. A WeakMap lets an old graph's entries be forgotten along with the graph
+const pastLimitSidesCache = new WeakMap<GraphInfo, Map<string, { right: string[]; bottom: string[] }>>();
+
+/**
+ * Sorts a node's children past the limit by the side the default layout would have put them on: right of the shown
+ * children goes in the right strip, anything else (in a shown column) goes in the bottom strip. At the top level they
+ * all wait below.
+ * @param info The graph lookups.
+ * @param parentId The node.
+ * @returns The hidden children on each side, most important first.
+ */
+export function pastLimitSides(info: GraphInfo, parentId: string): { right: string[]; bottom: string[] } {
+	let byParent = pastLimitSidesCache.get(info);
+	if (byParent === undefined) {
+		byParent = new Map();
+		pastLimitSidesCache.set(info, byParent);
+	}
+	const known = byParent.get(parentId);
+	if (known !== undefined) {
+		return known;
+	}
+
+	const past = childrenPastLimit(info, parentId);
+	const sides = { right: [] as string[], bottom: [] as string[] };
+	if (parentId === ROOT_ID) {
+		sides.bottom = past;
+	} else if (past.length > 0) {
+		// where every child would go if all of them had boxes
+		const all = info.childrenById.get(parentId) ?? [];
+		const sizes = new Map<string, Size>();
+		for (const id of all) {
+			sizes.set(id, defaultSize(info, id));
+		}
+		const positions = defaultLayout(all, liftEdges(parentId, info.edges, info.nodesById), sizes);
+
+		// the right edge of the shown children; anything starting past it would have been to their right
+		let shownRight = 0;
+		for (const id of shownChildren(info, parentId)) {
+			shownRight = Math.max(shownRight, positions.get(id)!.x + sizes.get(id)!.width);
+		}
+		for (const id of past) {
+			if (positions.get(id)!.x >= shownRight) {
+				sides.right.push(id);
+			} else {
+				sides.bottom.push(id);
+			}
+		}
+	}
+
+	byParent.set(parentId, sides);
+	return sides;
+}
+
 /**
  * Finds a box's size from its importance alone, ignoring anything the user did. Homes are laid out for this size.
  * @param info The graph lookups.
@@ -219,8 +273,9 @@ export function changeSize(state: LayoutState, info: GraphInfo, id: string, chan
 }
 
 /**
- * Moves a box's siblings to make room for its new size, or to take back room it no longer needs.
- * @param state The view state. Siblings past the box's old edges get new homes.
+ * Moves the siblings in a box's path to make room for its new size, or to take back room it no longer needs. Only
+ * what's in the way moves: below it in its column, beside it in its row, and whatever those would run into in turn.
+ * @param state The view state. Siblings in the path get new homes.
  * @param info The graph lookups.
  * @param id The box that changed size.
  * @param old Its size before.
@@ -234,19 +289,65 @@ function moveSiblingsForSize(state: LayoutState, info: GraphInfo, id: string, ol
 		return;
 	}
 
-	// like inserting a column and a row at its old right and bottom edges; a box past both moves both ways
-	const rightEdge = home.x + old.width;
-	const bottomEdge = home.y + old.height;
-	for (const siblingId of shownChildren(info, info.nodesById.get(id)!.parent!)) {
-		const sibling = state.homes.get(siblingId);
-		if (siblingId === id || sibling === undefined) {
-			continue;
+	// every other placed sibling, where it's drawn
+	const siblings = new Map<string, Rect>();
+	for (const [siblingId, rect] of arrangeChildren(state, info, info.nodesById.get(id)!.parent!)) {
+		if (siblingId !== id) {
+			siblings.set(siblingId, rect);
 		}
+	}
+
+	// the area the box covers at its bigger size, so growing and shrinking pick the same boxes; its edges are the old
+	// ones, since that's where the room opens or closes
+	const width = Math.max(old.width, now.width);
+	const height = Math.max(old.height, now.height);
+	const column = { start: home.x, end: home.x + width, edge: home.y + old.height };
+	const row = { start: home.y, end: home.y + height, edge: home.x + old.width };
+
+	const below = dy !== 0 ? chainInPath(siblings, column, 'down') : new Set<string>();
+	const beside = dx !== 0 ? chainInPath(siblings, row, 'right') : new Set<string>();
+	for (const siblingId of siblings.keys()) {
+		const sibling = state.homes.get(siblingId)!;
 		state.homes.set(siblingId, {
-			x: sibling.x >= rightEdge ? sibling.x + dx : sibling.x,
-			y: sibling.y >= bottomEdge ? sibling.y + dy : sibling.y,
+			x: beside.has(siblingId) ? sibling.x + dx : sibling.x,
+			y: below.has(siblingId) ? sibling.y + dy : sibling.y,
 		});
 	}
+}
+
+/**
+ * Finds the boxes in a growing box's path in one direction: those past its edge that share its column (going down) or
+ * row (going right), then those past them in theirs, since a moved box would run into them.
+ * @param siblings The boxes that might be in the way, where they're drawn.
+ * @param path The growing box's range across the direction (start to end) and its edge along it.
+ * @param direction 'down' for a column, 'right' for a row.
+ * @returns The ids of every box that has to move.
+ */
+function chainInPath(siblings: Map<string, Rect>, path: { start: number; end: number; edge: number }, direction: 'down' | 'right'): Set<string> {
+	// each box as its range across the direction, and where it starts and ends along it
+	function across(rect: Rect): { start: number; end: number } {
+		return direction === 'down' ? { start: rect.x, end: rect.x + rect.width } : { start: rect.y, end: rect.y + rect.height };
+	}
+	function along(rect: Rect): { start: number; end: number } {
+		return direction === 'down' ? { start: rect.y, end: rect.y + rect.height } : { start: rect.x, end: rect.x + rect.width };
+	}
+
+	const found = new Set<string>();
+
+	// the growing box first, then each box found, each looking past its own far edge within its own range
+	const toCheck = [{ start: path.start, end: path.end, edge: path.edge }];
+	while (toCheck.length > 0) {
+		const current = toCheck.pop()!;
+		for (const [siblingId, rect] of siblings) {
+			const range = across(rect);
+			const shares = range.start < current.end && current.start < range.end;
+			if (!found.has(siblingId) && shares && along(rect).start >= current.edge) {
+				found.add(siblingId);
+				toCheck.push({ start: range.start, end: range.end, edge: along(rect).end });
+			}
+		}
+	}
+	return found;
 }
 
 // what's drawn inside a box: where its shown children go, and which children wait behind each side's strip
@@ -267,17 +368,13 @@ export interface Arrangement {
 export function arrangeShown(state: LayoutState, info: GraphInfo, parentId: string): Arrangement {
 	const rects = arrangeChildren(state, info, parentId);
 
-	// children past the limit never got a home. At the top level they're the nodes outside the flow, which would stack
-	// in the first column, so they wait below; elsewhere they start behind the right strip
-	const beyondLimit = childrenPastLimit(info, parentId);
-	if (parentId === ROOT_ID) {
-		return { rects: rects, hiddenRight: [], hiddenBottom: beyondLimit };
-	}
+	// children past the limit never got a home; they wait on the side the default layout would have put them
+	const past = pastLimitSides(info, parentId);
 
 	// only a size the user chose can be too small; otherwise the box fits its children
 	const set = state.openSizes.get(parentId);
-	if (set === undefined || !state.expanded.has(parentId)) {
-		return { rects: rects, hiddenRight: beyondLimit, hiddenBottom: [] };
+	if (parentId === ROOT_ID || set === undefined || !state.expanded.has(parentId)) {
+		return { rects: rects, hiddenRight: past.right, hiddenBottom: past.bottom };
 	}
 
 	// the inside: within the padding on every side and below the title, measured from where children start
@@ -287,31 +384,35 @@ export function arrangeShown(state: LayoutState, info: GraphInfo, parentId: stri
 
 	// a side with a strip gives it room; if squishing only finds out it must hide something there, it tries again with
 	// the room set aside
-	let across = squishHorizontally(rects, insideWidth - (beyondLimit.length > 0 ? STRIP_ROOM : 0));
-	if (across.hidden.length > 0 && beyondLimit.length === 0) {
+	let across = squishHorizontally(rects, insideWidth - (past.right.length > 0 ? STRIP_ROOM : 0));
+	if (across.hidden.length > 0 && past.right.length === 0) {
 		across = squishHorizontally(rects, insideWidth - STRIP_ROOM);
 	}
-	let down = squishVertically(across.rects, insideHeight);
-	if (down.hidden.length > 0) {
+	let down = squishVertically(across.rects, insideHeight - (past.bottom.length > 0 ? STRIP_ROOM : 0));
+	if (down.hidden.length > 0 && past.bottom.length === 0) {
 		down = squishVertically(across.rects, insideHeight - STRIP_ROOM);
 	}
 
 	return {
 		rects: down.rects,
-		hiddenRight: across.hidden.concat(beyondLimit),
-		hiddenBottom: down.hidden,
+		hiddenRight: across.hidden.concat(past.right),
+		hiddenBottom: down.hidden.concat(past.bottom),
 	};
 }
 
 /**
- * Finds how much room a box keeps on its right for a strip of children past the limit.
+ * Finds how much room a box keeps for strips of children past the limit, on each side.
  * @param info The graph lookups.
  * @param id The box.
- * @returns STRIP_ROOM if some children never get a box, otherwise nothing. The top level keeps its own strip below
- *   the boxes instead.
+ * @returns STRIP_ROOM on each side that has some, otherwise nothing. The top level keeps its own strip below the boxes
+ *   instead, outside any box.
  */
-function rightStripRoom(info: GraphInfo, id: string): number {
-	return id !== ROOT_ID && childrenPastLimit(info, id).length > 0 ? STRIP_ROOM : 0;
+function pastLimitRoom(info: GraphInfo, id: string): { right: number; bottom: number } {
+	if (id === ROOT_ID) {
+		return { right: 0, bottom: 0 };
+	}
+	const past = pastLimitSides(info, id);
+	return { right: past.right.length > 0 ? STRIP_ROOM : 0, bottom: past.bottom.length > 0 ? STRIP_ROOM : 0 };
 }
 
 /**
@@ -331,9 +432,10 @@ export function fitSize(state: LayoutState, info: GraphInfo, id: string): Size {
 		bottom = Math.max(bottom, rect.y + rect.height);
 	}
 
-	// plus room for the strip of children past the limit, so its padding is even too
+	// plus room for strips of children past the limit, so their padding is even too
 	const origin = childOrigin();
-	return { width: origin.x + right + PADDING + rightStripRoom(info, id), height: origin.y + bottom + PADDING };
+	const room = pastLimitRoom(info, id);
+	return { width: origin.x + right + PADDING + room.right, height: origin.y + bottom + PADDING + room.bottom };
 }
 
 /**
@@ -478,9 +580,10 @@ export function growToFit(state: LayoutState, info: GraphInfo, id: string): void
 		const rect = arrangeChildren(state, info, ancestorId).get(child);
 		if (set !== undefined && rect !== undefined) {
 			// what this one box needs: up to its far edges, plus the padding (and the title, going down)
+			const room = pastLimitRoom(info, ancestorId);
 			state.openSizes.set(ancestorId, {
-				width: Math.max(set.width, origin.x + rect.x + rect.width + PADDING + rightStripRoom(info, ancestorId)),
-				height: Math.max(set.height, origin.y + rect.y + rect.height + PADDING),
+				width: Math.max(set.width, origin.x + rect.x + rect.width + PADDING + room.right),
+				height: Math.max(set.height, origin.y + rect.y + rect.height + PADDING + room.bottom),
 			});
 		}
 		child = ancestorId;
@@ -527,8 +630,9 @@ function setSize(state: LayoutState, info: GraphInfo, id: string, size: Size): v
 		// at the smallest size, a row or column longer than 3 hides boxes, which brings a strip that needs its room
 		const hidesAcross = squishHorizontally(children, smallestWidth).hidden.length > 0;
 		const hidesDown = squishVertically(children, smallestHeight).hidden.length > 0;
-		const rightRoom = rightStripRoom(info, id) > 0 || hidesAcross ? STRIP_ROOM : 0;
-		const bottomRoom = hidesDown ? STRIP_ROOM : 0;
+		const room = pastLimitRoom(info, id);
+		const rightRoom = room.right > 0 || hidesAcross ? STRIP_ROOM : 0;
+		const bottomRoom = room.bottom > 0 || hidesDown ? STRIP_ROOM : 0;
 
 		minWidth = Math.max(minWidth, origin.x + smallestWidth + PADDING + rightRoom);
 		minHeight = Math.max(HEADER, origin.y + smallestHeight + PADDING + bottomRoom);

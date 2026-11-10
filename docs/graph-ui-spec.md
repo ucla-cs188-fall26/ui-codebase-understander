@@ -72,7 +72,7 @@ Each rule should become a test.
 
 - Opening a child grows its parent and never adds to the parent's `+N`.
 - Opening or closing a directory never makes two boxes swap sides.
-- When a box grows (opening or resizing), siblings past its old right edge move right by the growth, and those past its old bottom edge move down, like inserting a row or column, once, at that moment. Shrinking moves them back by the same amount, so closing a box right after opening it puts everyone back. A box is always drawn where its saved position says, so nothing shifts later on its own.
+- When a box grows (opening or resizing), only what's in its path moves, once, at that moment: siblings below it in its column move down by the growth, siblings beside it in its row move right, and anything those would run into moves along with them. Boxes off to the side stay put. Shrinking moves them back by the same amount, so closing a box right after opening it puts everyone back. A box is always drawn where its saved position says, so nothing shifts later on its own.
 
 ## Arrows
 
