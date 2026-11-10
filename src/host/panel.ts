@@ -61,7 +61,12 @@ function buildHtml(scriptUri: vscode.Uri): string {
 	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
 	<style nonce="${nonce}">
+		html {
+			height: 100%;
+		}
 		body {
+			height: 100%;
+			cursor: grab;
 			margin: 0;
 			padding: 0;
 			overflow: hidden;
@@ -70,24 +75,32 @@ function buildHtml(scriptUri: vscode.Uri): string {
 			font-family: var(--vscode-font-family);
 			font-size: var(--vscode-font-size);
 		}
+		body.panning {
+			cursor: grabbing;
+		}
 		#world {
 			position: relative;
+			transform-origin: 0 0;
 		}
-		#arrows {
+		.arrow {
 			position: absolute;
 			left: 0;
 			top: 0;
 			overflow: visible;
 			pointer-events: none;
 		}
-		#arrows path {
+		.arrow path {
 			fill: none;
 			stroke: var(--vscode-editorLineNumber-foreground);
 			stroke-width: 1.5;
 		}
-		#arrows marker path {
+		#arrowheads {
+			position: absolute;
+			width: 0;
+			height: 0;
+		}
+		#arrowheads path {
 			fill: var(--vscode-editorLineNumber-foreground);
-			stroke: none;
 		}
 		.box {
 			position: absolute;
@@ -101,6 +114,29 @@ function buildHtml(scriptUri: vscode.Uri): string {
 		}
 		.box.folder {
 			font-weight: 600;
+		}
+		.box.selected {
+			border-color: var(--vscode-focusBorder);
+		}
+		.chevron {
+			display: inline-flex;
+			flex-shrink: 0;
+			align-items: center;
+			justify-content: center;
+			width: 20px;
+			height: 20px;
+			margin: 0 4px 0 -4px;
+			border-radius: 4px;
+			font-size: 14px;
+			cursor: pointer;
+		}
+		.chevron:hover {
+			background: var(--vscode-toolbar-hoverBackground);
+		}
+		.box.open {
+			align-items: flex-start;
+			padding-top: 8px;
+			background: var(--vscode-editor-background);
 		}
 		.box.more {
 			border-style: dashed;

@@ -32,6 +32,30 @@ export function indexEdgesTo(edges: Edge[]): Map<string, Edge[]> {
 }
 
 /**
+ * Drops repeats, so each pair of nodes has at most one edge in each direction.
+ * @param edges The edges, possibly with several between the same two nodes.
+ * @returns The first edge of each pair, in the original order.
+ */
+export function keepOnePerPair(edges: Edge[]): Edge[] {
+	const kept: Edge[] = [];
+
+	// which nodes each node already has an edge to
+	const targetsById = new Map<string, Set<string>>();
+
+	for (const edge of edges) {
+		const targets = targetsById.get(edge.from) ?? new Set<string>();
+		if (targets.has(edge.to)) {
+			continue;
+		}
+		targets.add(edge.to);
+		targetsById.set(edge.from, targets);
+		kept.push(edge);
+	}
+
+	return kept;
+}
+
+/**
  * Finds which direct child of a parent holds a node, so nested nodes can stand in for their containers.
  * @param id The node to look for.
  * @param parentId The parent whose children we want.
@@ -57,9 +81,6 @@ export function findChildContaining(id: string, parentId: string, nodesById: Map
 export function liftEdges(parentId: string, edges: Edge[], nodesById: Map<string, Node>): Edge[] {
 	const liftedEdges: Edge[] = [];
 
-	// which children each child already has an edge to, so each pair is added once
-	const targetsByChild = new Map<string, Set<string>>();
-
 	for (const edge of edges) {
 		const from = findChildContaining(edge.from, parentId, nodesById);
 		const to = findChildContaining(edge.to, parentId, nodesById);
@@ -74,15 +95,9 @@ export function liftEdges(parentId: string, edges: Edge[], nodesById: Map<string
 			continue;
 		}
 
-		const targets = targetsByChild.get(from) ?? new Set<string>();
-		if (targets.has(to)) {
-			continue;
-		}
-		targets.add(to);
-		targetsByChild.set(from, targets);
-
 		liftedEdges.push({ from: from, to: to, kind: edge.kind });
 	}
 
-	return liftedEdges;
+	// many nested edges can land on the same two children
+	return keepOnePerPair(liftedEdges);
 }

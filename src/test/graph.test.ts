@@ -7,8 +7,11 @@ import { findChildContaining, liftEdges } from '../analysis/edges';
 import { assignColumns, findBackEdges } from '../layout/columns';
 import { defaultLayout, GAP } from '../layout/defaultLayout';
 import { arrowPath, chooseSides, placeArrows } from '../layout/arrows';
+import { MAX_SCALE, zoomAt } from '../layout/camera';
+import { arrangeChildren, boxSize, buildGraphInfo, childOrigin, closeNode, createLayoutState, GraphInfo, openNode } from '../layout/state';
+import { arrowZIndex, boxZIndexes, placeBoxes, visibleEdges } from '../layout/place';
 import { nodeSize } from '../layout/size';
-import { Edge } from '../graph/types';
+import { Edge, ROOT_ID } from '../graph/types';
 import { CHILD_LIMIT, getVisibleNodes } from '../layout/visibility';
 import { resolveImport } from '../graph/resolve';
 
@@ -379,5 +382,237 @@ suite('arrowPath', () => {
 
 		// 100 apart, so each pull point sits 50 out: both land at x = 150
 		assert.strictEqual(arrowPath(arrow), 'M 100 25 C 150 25, 150 25, 200 25');
+	});
+});
+
+suite('zoomAt', () => {
+	test('keeps the world point under the mouse in place', () => {
+		// before: the mouse at (110, 70) is over world point (100, 50)
+		const camera = zoomAt({ x: 10, y: 20, scale: 1 }, { x: 110, y: 70 }, 2);
+
+		assert.deepStrictEqual(camera, { x: -90, y: -30, scale: 2 });
+		// after: (110 - -90) / 2 = 100 and (70 - -30) / 2 = 50, the same world point
+	});
+
+	test('stops at the largest scale', () => {
+		const camera = zoomAt({ x: 0, y: 0, scale: 2.5 }, { x: 0, y: 0 }, 2);
+
+		assert.strictEqual(camera.scale, MAX_SCALE);
+	});
+});
+
+// a small graph for the view tests: root → src → { a.ts, lib → { b.ts, c.ts } }, with a.ts importing b.ts
+function makeInfo(): GraphInfo {
+	const nodes = buildTree('repo', ['src/a.ts', 'src/lib/b.ts', 'src/lib/c.ts']);
+	return buildGraphInfo({ nodes: nodes, edges: [edge('src/a.ts', 'src/lib/b.ts')] });
+}
+
+suite('layout state', () => {
+	test('opening a box gives its children homes', () => {
+		const info = makeInfo();
+		const state = createLayoutState();
+
+		openNode(state, info, 'src');
+
+		assert.ok(state.homes.has('src/a.ts'));
+		assert.ok(state.homes.has('src/lib'));
+	});
+
+	test('reopening a box keeps homes the user changed', () => {
+		const info = makeInfo();
+		const state = createLayoutState();
+		openNode(state, info, 'src');
+
+		// what dragging will do
+		state.homes.set('src/a.ts', { x: 500, y: 500 });
+		closeNode(state, 'src');
+		openNode(state, info, 'src');
+
+		assert.deepStrictEqual(state.homes.get('src/a.ts'), { x: 500, y: 500 });
+	});
+
+	test('an open box fits its children, plus padding and room for its name', () => {
+		const info = makeInfo();
+		const state = createLayoutState();
+		state.expanded.add('src');
+		state.homes.set('src/a.ts', { x: 0, y: 0 });
+		state.homes.set('src/lib', { x: 200, y: 0 });
+		state.closedSizes.set('src/a.ts', { width: 100, height: 50 });
+		state.closedSizes.set('src/lib', { width: 100, height: 80 });
+
+		// children reach x = 300 and y = 80; padding is 20 per side and the name takes 32 at the top
+		assert.deepStrictEqual(boxSize(state, info, 'src'), { width: 20 + 300 + 20, height: 32 + 20 + 80 + 20 });
+	});
+
+	test('opening a child grows its parent', () => {
+		const info = makeInfo();
+		const state = createLayoutState();
+		openNode(state, info, 'src');
+		const before = boxSize(state, info, 'src');
+
+		openNode(state, info, 'src/lib');
+		const after = boxSize(state, info, 'src');
+
+		assert.ok(after.width > before.width || after.height > before.height);
+	});
+
+	test('sizes the user gave win over the defaults', () => {
+		const info = makeInfo();
+		const state = createLayoutState();
+		state.closedSizes.set('src/a.ts', { width: 300, height: 300 });
+		openNode(state, info, 'src');
+		state.openSizes.set('src', { width: 999, height: 999 });
+
+		assert.deepStrictEqual(boxSize(state, info, 'src/a.ts'), { width: 300, height: 300 });
+		assert.deepStrictEqual(boxSize(state, info, 'src'), { width: 999, height: 999 });
+	});
+
+	test('the root stays open', () => {
+		const state = createLayoutState();
+
+		closeNode(state, ROOT_ID);
+
+		assert.ok(state.expanded.has(ROOT_ID));
+	});
+});
+
+suite('arrangeChildren', () => {
+	// p holds a 2×2 block of 100×50 boxes: a top-left, b top-right, c bottom-left, d bottom-right.
+	// a is a folder, so it can open.
+	function makeBlock() {
+		const nodes = buildTree('repo', ['p/a/x.ts', 'p/b.ts', 'p/c.ts', 'p/d.ts']);
+		const info = buildGraphInfo({ nodes: nodes, edges: [] });
+		const state = createLayoutState();
+		const homes: [string, { x: number; y: number }][] = [
+			['p/a', { x: 0, y: 0 }],
+			['p/b.ts', { x: 200, y: 0 }],
+			['p/c.ts', { x: 0, y: 100 }],
+			['p/d.ts', { x: 200, y: 100 }],
+		];
+		for (const [id, home] of homes) {
+			state.homes.set(id, home);
+			state.closedSizes.set(id, { width: 100, height: 50 });
+		}
+		return { info: info, state: state };
+	}
+
+	test('leaves everything at home when nothing has grown', () => {
+		const { info, state } = makeBlock();
+
+		const arranged = arrangeChildren(state, info, 'p');
+
+		assert.deepStrictEqual(arranged.get('p/a'), { x: 0, y: 0, width: 100, height: 50 });
+		assert.deepStrictEqual(arranged.get('p/d.ts'), { x: 200, y: 100, width: 100, height: 50 });
+	});
+
+	test('shifts boxes past a grown box right, down, or both, keeping their places', () => {
+		const { info, state } = makeBlock();
+
+		// a opens 100 wider and 50 taller than its closed size
+		state.expanded.add('p/a');
+		state.openSizes.set('p/a', { width: 200, height: 100 });
+		const arranged = arrangeChildren(state, info, 'p');
+
+		assert.deepStrictEqual(arranged.get('p/b.ts'), { x: 300, y: 0, width: 100, height: 50 });
+		assert.deepStrictEqual(arranged.get('p/c.ts'), { x: 0, y: 150, width: 100, height: 50 });
+		assert.deepStrictEqual(arranged.get('p/d.ts'), { x: 300, y: 150, width: 100, height: 50 });
+	});
+
+	test('puts everything back home when the grown box closes', () => {
+		const { info, state } = makeBlock();
+		state.expanded.add('p/a');
+		state.openSizes.set('p/a', { width: 200, height: 100 });
+
+		closeNode(state, 'p/a');
+		const arranged = arrangeChildren(state, info, 'p');
+
+		assert.deepStrictEqual(arranged.get('p/b.ts'), { x: 200, y: 0, width: 100, height: 50 });
+		assert.deepStrictEqual(arranged.get('p/c.ts'), { x: 0, y: 100, width: 100, height: 50 });
+		assert.deepStrictEqual(arranged.get('p/d.ts'), { x: 200, y: 100, width: 100, height: 50 });
+	});
+});
+
+suite('placing boxes', () => {
+	test('places children inside their open parent, below its name', () => {
+		const info = makeInfo();
+		const state = createLayoutState();
+		openNode(state, info, ROOT_ID);
+		openNode(state, info, 'src');
+
+		const rects = placeBoxes(state, info, { x: 0, y: 0 });
+
+		const src = rects.get('src')!;
+		const a = rects.get('src/a.ts')!;
+		const home = state.homes.get('src/a.ts')!;
+		assert.strictEqual(a.x, src.x + childOrigin().x + home.x);
+		assert.strictEqual(a.y, src.y + childOrigin().y + home.y);
+	});
+
+	test('gives no box to children of a closed box', () => {
+		const info = makeInfo();
+		const state = createLayoutState();
+		openNode(state, info, ROOT_ID);
+
+		const rects = placeBoxes(state, info, { x: 0, y: 0 });
+
+		assert.ok(rects.has('src'));
+		assert.ok(!rects.has('src/a.ts'));
+	});
+
+	test('attaches arrows to the closed box holding each end', () => {
+		const info = makeInfo();
+		const state = createLayoutState();
+		openNode(state, info, ROOT_ID);
+		openNode(state, info, 'src');
+		const rects = placeBoxes(state, info, { x: 0, y: 0 });
+
+		// a.ts imports lib/b.ts, and lib is closed, so the arrow ends at lib
+		assert.deepStrictEqual(visibleEdges(state, info, rects), [edge('src/a.ts', 'src/lib')]);
+	});
+
+	test('draws no arrow when both ends are in one closed box', () => {
+		const info = makeInfo();
+		const state = createLayoutState();
+		openNode(state, info, ROOT_ID);
+		const rects = placeBoxes(state, info, { x: 0, y: 0 });
+
+		assert.deepStrictEqual(visibleEdges(state, info, rects), []);
+	});
+});
+
+suite('paint order', () => {
+	test('numbers boxes so children paint above their parent', () => {
+		const info = makeInfo();
+		const state = createLayoutState();
+		openNode(state, info, ROOT_ID);
+		openNode(state, info, 'src');
+
+		const boxZ = boxZIndexes(placeBoxes(state, info, { x: 0, y: 0 }));
+
+		assert.strictEqual(boxZ.get('src'), 2);
+		assert.ok(boxZ.get('src/a.ts')! > 2);
+		assert.ok(boxZ.get('src/lib')! > 2);
+	});
+
+	test('paints an arrow just above the open box holding its ends', () => {
+		const info = makeInfo();
+		const state = createLayoutState();
+		openNode(state, info, ROOT_ID);
+		openNode(state, info, 'src');
+		const boxZ = boxZIndexes(placeBoxes(state, info, { x: 0, y: 0 }));
+
+		const z = arrowZIndex(edge('src/a.ts', 'src/lib'), state, info, boxZ);
+
+		assert.strictEqual(z, boxZ.get('src')! + 1);
+	});
+
+	test('paints an arrow below every box when no open box holds its ends', () => {
+		const nodes = buildTree('repo', ['src/a.ts', 'top.ts']);
+		const info = buildGraphInfo({ nodes: nodes, edges: [] });
+		const state = createLayoutState();
+		openNode(state, info, ROOT_ID);
+		const boxZ = boxZIndexes(placeBoxes(state, info, { x: 0, y: 0 }));
+
+		assert.strictEqual(arrowZIndex(edge('src', 'top.ts'), state, info, boxZ), 1);
 	});
 });

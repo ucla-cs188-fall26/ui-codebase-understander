@@ -1,13 +1,12 @@
-import { Edge, Graph, ROOT_ID } from '../graph/types';
+import { ROOT_ID } from '../graph/types';
 import { ExtensionToWebview, WebviewToExtension } from '../messages';
-import { indexChildren, indexNodes } from '../analysis/lookups';
-import { computeIndegrees, sortAllChildren } from '../analysis/metrics';
-import { liftEdges } from '../analysis/edges';
-import { defaultLayout, GAP } from '../layout/defaultLayout';
+import { GAP } from '../layout/defaultLayout';
 import { Arrow, arrowPath, placeArrows } from '../layout/arrows';
+import { Camera, zoomAt } from '../layout/camera';
 import { nodeSize } from '../layout/size';
-import { Rect, Size } from '../layout/geometry';
-import { getVisibleNodes } from '../layout/visibility';
+import { Position } from '../layout/geometry';
+import { buildGraphInfo, closeNode, createLayoutState, GraphInfo, LayoutState, openNode, shownChildren } from '../layout/state';
+import { arrowZIndex, boxZIndexes, placeBoxes, visibleEdges } from '../layout/place';
 
 // VS Code provides this once per webview; calling it a second time throws
 declare function acquireVsCodeApi(): { postMessage(message: WebviewToExtension): void };
@@ -47,15 +46,13 @@ function makeBox(label: string, kind: string, x: number, y: number, width: numbe
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
 /**
- * Makes the layer that holds every arrow.
- * @param arrows The arrows, from placeArrows, already in page coordinates.
- * @returns An svg element. Put it before the boxes so the boxes paint on top.
+ * Makes the arrowhead shape every arrow points with. Arrows anywhere on the page can use it as url(#arrowhead).
+ * @returns An invisible svg element holding the shape.
  */
-function drawArrows(arrows: Arrow[]): SVGSVGElement {
+function makeArrowheadDefs(): SVGSVGElement {
 	const svg = document.createElementNS(SVG_NS, 'svg');
-	svg.id = 'arrows';
+	svg.id = 'arrowheads';
 
-	// one arrowhead shape, defined once and reused by every arrow
 	const defs = document.createElementNS(SVG_NS, 'defs');
 	const marker = document.createElementNS(SVG_NS, 'marker');
 	marker.id = 'arrowhead';
@@ -71,84 +68,226 @@ function drawArrows(arrows: Arrow[]): SVGSVGElement {
 	defs.appendChild(marker);
 	svg.appendChild(defs);
 
-	for (const arrow of arrows) {
-		const path = document.createElementNS(SVG_NS, 'path');
-		path.setAttribute('d', arrowPath(arrow));
-		path.setAttribute('marker-end', 'url(#arrowhead)');
-		svg.appendChild(path);
-	}
+	return svg;
+}
+
+/**
+ * Makes one arrow, in its own svg so it can paint at its own depth among the boxes.
+ * @param arrow The arrow, from placeArrows, in page coordinates.
+ * @param zIndex How high it paints, from arrowZIndex.
+ * @returns The svg element holding the arrow.
+ */
+function makeArrow(arrow: Arrow, zIndex: number): SVGSVGElement {
+	const svg = document.createElementNS(SVG_NS, 'svg');
+	svg.classList.add('arrow');
+	svg.style.zIndex = String(zIndex);
+
+	const path = document.createElementNS(SVG_NS, 'path');
+	path.setAttribute('d', arrowPath(arrow));
+	path.setAttribute('marker-end', 'url(#arrowhead)');
+	svg.appendChild(path);
 
 	return svg;
 }
 
 /**
- * Draws the root's visible children in a row, replacing whatever was drawn before.
- * @param graph The graph from the extension.
+ * Counts the children a box keeps behind "+N more".
+ * @param info The graph lookups.
+ * @param id The box.
+ * @returns How many of its children have no box of their own.
  */
-function drawGraph(graph: Graph): void {
-	const nodesById = indexNodes(graph.nodes);
-	const indegrees = computeIndegrees(nodesById, graph.edges);
-	const childrenById = sortAllChildren(indexChildren(graph.nodes), nodesById, indegrees);
+function hiddenCount(info: GraphInfo, id: string): number {
+	const children = info.childrenById.get(id) ?? [];
+	return children.length - shownChildren(info, id).length;
+}
 
-	// nothing expanded yet, so this is the root and its first few children
-	const visible = getVisibleNodes(childrenById, new Set(), new Map());
-
-	// the root's shown children, most important first; the page itself stands for the root
-	const childIds: string[] = [];
-	for (const id of visible.nodeIds) {
-		if (id !== ROOT_ID) {
-			childIds.push(id);
-		}
+/**
+ * Draws every visible box and arrow from the current state, replacing whatever was drawn before.
+ */
+function drawGraph(): void {
+	if (info === undefined) {
+		return;
 	}
 
-	// only edges between shown children, so a hidden child can't push a shown one rightward
-	const shown = new Set(childIds);
-	const edges: Edge[] = [];
-	for (const edge of liftEdges(ROOT_ID, graph.edges, nodesById)) {
-		if (shown.has(edge.from) && shown.has(edge.to)) {
-			edges.push(edge);
-		}
-	}
-
-	const sizes = new Map<string, Size>();
-	for (const id of childIds) {
-		const node = nodesById.get(id)!;
-		sizes.set(id, nodeSize(node.childCount, indegrees.get(id)!));
-	}
-
-	const positions = defaultLayout(childIds, edges, sizes);
-
-	// each box's place on the page: its layout position plus the margin, and its size
-	const rects = new Map<string, Rect>();
-	for (const id of childIds) {
-		const position = positions.get(id)!;
-		const size = sizes.get(id)!;
-		rects.set(id, { x: START_X + position.x, y: START_Y + position.y, width: size.width, height: size.height });
-	}
+	const rects = placeBoxes(state, info, { x: START_X, y: START_Y });
 
 	const world = document.getElementById('world')!;
 	world.replaceChildren();
 
-	// arrows first, so the boxes added after them paint on top
-	world.appendChild(drawArrows(placeArrows(edges, rects)));
-
-	for (const id of childIds) {
-		const node = nodesById.get(id)!;
-		const rect = rects.get(id)!;
-		world.appendChild(makeBox(node.name, node.kind, rect.x, rect.y, rect.width, rect.height));
+	// paint order: each box gets a z-index, and each arrow sits just above the open boxes holding its ends
+	const boxZ = boxZIndexes(rects);
+	world.appendChild(makeArrowheadDefs());
+	const edges = visibleEdges(state, info, rects);
+	const arrows = placeArrows(edges, rects);
+	for (let i = 0; i < arrows.length; i++) {
+		// placeArrows keeps the edges' order, so arrows[i] belongs to edges[i]
+		world.appendChild(makeArrow(arrows[i], arrowZIndex(edges[i], state, info, boxZ)));
 	}
 
-	// the layout's bottom edge, so "+N more" can sit below everything
-	let bottom = 0;
-	for (const id of childIds) {
-		bottom = Math.max(bottom, positions.get(id)!.y + sizes.get(id)!.height);
+	for (const [id, rect] of rects) {
+		const node = info.nodesById.get(id)!;
+		const isOpen = state.expanded.has(id);
+
+		// an open box shows how many children it is hiding next to its name
+		let label = node.name;
+		const hidden = hiddenCount(info, id);
+		if (isOpen && hidden > 0) {
+			label += ' · +' + hidden + ' more';
+		}
+
+		const kind = isOpen ? node.kind + ' open' : node.kind;
+		const box = makeBox(label, kind, rect.x, rect.y, rect.width, rect.height);
+
+		// so a click can tell which node it landed on
+		box.dataset.id = id;
+		box.style.zIndex = String(boxZ.get(id));
+
+		if (id === selectedId) {
+			box.classList.add('selected');
+		}
+
+		// anything that can hold children gets an arrow to open or close it
+		if (node.kind !== 'file') {
+			const chevron = document.createElement('span');
+			chevron.className = 'chevron';
+			chevron.textContent = isOpen ? '▾' : '▸';
+			box.prepend(chevron);
+		}
+
+		world.appendChild(box);
 	}
 
-	for (const more of visible.moreBoxes) {
+	// the root has no box to show a count in, so its "+N more" sits below everything
+	const rootHidden = hiddenCount(info, ROOT_ID);
+	if (rootHidden > 0) {
+		let bottom = START_Y;
+		for (const rect of rects.values()) {
+			bottom = Math.max(bottom, rect.y + rect.height);
+		}
+
 		const size = nodeSize(0, 0);
-		const label = '+' + more.hiddenIds.length + ' more';
-		world.appendChild(makeBox(label, 'more', START_X, START_Y + bottom + GAP, size.width, size.height));
+		world.appendChild(makeBox('+' + rootHidden + ' more', 'more', START_X, bottom + GAP, size.width, size.height));
 	}
+}
+
+// the current graph's lookups, and what's open and where; undefined until a graph arrives
+let info: GraphInfo | undefined = undefined;
+let state: LayoutState = createLayoutState();
+
+// the node whose details the sidebar shows, or undefined when nothing is selected
+let selectedId: string | undefined = undefined;
+
+// how the world is shown; kept between redraws so new data doesn't reset the view
+let camera: Camera = { x: 0, y: 0, scale: 1 };
+
+// how strongly one wheel step zooms; small, because trackpads send many tiny steps
+const ZOOM_SPEED = 0.005;
+
+/**
+ * Moves and scales the whole world to match the camera.
+ */
+function applyCamera(): void {
+	const world = document.getElementById('world')!;
+	world.style.transform = 'translate(' + camera.x + 'px, ' + camera.y + 'px) scale(' + camera.scale + ')';
+}
+
+/**
+ * Zooms around the mouse. Scrolling is always zoom, never page scroll.
+ * @param event The browser's wheel event.
+ */
+function handleWheel(event: WheelEvent): void {
+	event.preventDefault();
+
+	// scrolling up (negative deltaY) zooms in; exp keeps big and tiny steps both smooth
+	const factor = Math.exp(-event.deltaY * ZOOM_SPEED);
+	camera = zoomAt(camera, { x: event.clientX, y: event.clientY }, factor);
+	applyCamera();
+}
+
+// where the mouse was at the last move while panning, or undefined when not panning
+let panLast: Position | undefined = undefined;
+
+// where the latest press started, so a click that was really a drag can be ignored
+let pressStart: Position = { x: 0, y: 0 };
+
+// how far the mouse may move between press and release and still count as a click, in pixels
+const CLICK_SLOP = 4;
+
+/**
+ * Starts panning when the press lands on empty space, not on a box.
+ * @param event The browser's pointer event.
+ */
+function handlePointerDown(event: PointerEvent): void {
+	pressStart = { x: event.clientX, y: event.clientY };
+
+	const target = event.target as Element;
+	if (target.closest('.box') !== null) {
+		return;
+	}
+
+	panLast = { x: event.clientX, y: event.clientY };
+
+	// keep receiving moves even if the mouse leaves the panel mid-drag
+	document.body.setPointerCapture(event.pointerId);
+	document.body.classList.add('panning');
+}
+
+/**
+ * Moves the world along with the mouse while panning.
+ * @param event The browser's pointer event.
+ */
+function handlePointerMove(event: PointerEvent): void {
+	if (panLast === undefined) {
+		return;
+	}
+
+	camera = { x: camera.x + event.clientX - panLast.x, y: camera.y + event.clientY - panLast.y, scale: camera.scale };
+	panLast = { x: event.clientX, y: event.clientY };
+	applyCamera();
+}
+
+/**
+ * Stops panning.
+ */
+function handlePointerUp(): void {
+	panLast = undefined;
+	document.body.classList.remove('panning');
+}
+
+/**
+ * Handles a click: the arrow on a box opens or closes it, anywhere else on a box selects it,
+ * and empty space clears the selection.
+ * @param event The browser's mouse event.
+ */
+function handleClick(event: MouseEvent): void {
+	if (info === undefined) {
+		return;
+	}
+
+	// moved too far: this was a drag, not a click
+	const moved = Math.hypot(event.clientX - pressStart.x, event.clientY - pressStart.y);
+	if (moved > CLICK_SLOP) {
+		return;
+	}
+
+	const target = event.target as Element;
+	const box = target.closest<HTMLElement>('.box');
+	const id = box?.dataset.id;
+
+	// empty space, or the "+N more" box, which has no node
+	if (id === undefined) {
+		selectedId = undefined;
+	} else if (target.closest('.chevron') !== null) {
+		if (state.expanded.has(id)) {
+			closeNode(state, id);
+		} else {
+			openNode(state, info, id);
+		}
+	} else {
+		selectedId = id;
+	}
+
+	drawGraph();
 }
 
 /**
@@ -157,10 +296,24 @@ function drawGraph(graph: Graph): void {
  */
 function handleMessage(event: MessageEvent<ExtensionToWebview>): void {
 	if (event.data.type === 'graph') {
-		drawGraph(event.data.graph);
+		info = buildGraphInfo(event.data.graph);
+
+		// a fresh view each time for now; saved layouts come later
+		state = createLayoutState();
+		openNode(state, info, ROOT_ID);
+
+		drawGraph();
 	}
 }
 
 // listen first, then ask, so the reply can't arrive before anyone is listening
 window.addEventListener('message', handleMessage);
+
+// passive: false, or the browser ignores preventDefault on wheel events
+window.addEventListener('wheel', handleWheel, { passive: false });
+
+document.body.addEventListener('pointerdown', handlePointerDown);
+document.body.addEventListener('pointermove', handlePointerMove);
+document.body.addEventListener('pointerup', handlePointerUp);
+document.body.addEventListener('click', handleClick);
 vscode.postMessage({ type: 'ready' });
