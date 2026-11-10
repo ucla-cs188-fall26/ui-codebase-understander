@@ -1,9 +1,11 @@
 import * as assert from 'assert';
 import { buildEdges, buildTree } from '../graph/build';
 import { scanImports } from '../graph/imports';
-import { computeIndegrees, indexNodes, nodeSize } from '../view/metrics';
+import { indexChildren, indexNodes } from '../analysis/lookups';
+import { computeIndegrees, sortChildrenOfFolder } from '../analysis/metrics';
+import { nodeSize } from '../layout/size';
 import { Edge } from '../graph/types';
-import { CHILD_LIMIT, getVisibleNodes, indexChildren, sortChildrenOfFolder } from '../view/visibility';
+import { CHILD_LIMIT, getVisibleNodes } from '../layout/visibility';
 import { resolveImport } from '../graph/resolve';
 
 suite('buildTree', () => {

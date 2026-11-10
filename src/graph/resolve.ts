@@ -1,7 +1,8 @@
 import { posix } from 'path';
+import { CODE_EXTENSIONS } from './imports';
 
 // tried in order, so .ts wins over .js when both exist
-const EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.json'];
+const EXTENSIONS = [...CODE_EXTENSIONS, '.json'];
 
 // other filenames to look for when a compiled file doesn't exist
 const COMPILED_TO_SOURCE: Record<string, string[]> = {

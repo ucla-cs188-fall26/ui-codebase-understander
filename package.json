@@ -14,8 +14,9 @@
   "contributes": {
     "commands": [
       {
-        "command": "codeflow-visualizer.helloWorld",
-        "title": "Hello World"
+        "command": "codeflow-visualizer.openGraph",
+        "title": "Open Graph",
+        "category": "Codeflow"
       }
     ]
   },
