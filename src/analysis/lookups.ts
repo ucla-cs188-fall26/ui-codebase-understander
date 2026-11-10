@@ -14,9 +14,9 @@ export function indexNodes(nodes: Node[]): Map<string, Node> {
 }
 
 /**
- * Builds the folder-to-children lookup. Call this once per graph and share the result.
+ * Builds the parent-to-children lookup. Call this once per graph and share the result.
  * @param nodes Every node in the graph.
- * @returns A map from each folder's id to its children's ids.
+ * @returns A map from each parent's id to its children's ids.
  */
 export function indexChildren(nodes: Node[]): Map<string, string[]> {
 	const childrenById = new Map<string, string[]>();

@@ -24,7 +24,7 @@ const esbuildProblemMatcherPlugin = {
 };
 
 async function main() {
-	const ctx = await esbuild.context({
+	const extensionContext = await esbuild.context({
 		entryPoints: [
 			'src/host/extension.ts'
 		],
@@ -42,11 +42,33 @@ async function main() {
 			esbuildProblemMatcherPlugin,
 		],
 	});
-	if (watch) {
-		await ctx.watch();
-	} else {
-		await ctx.rebuild();
-		await ctx.dispose();
+
+	// the graph view runs in a browser inside VS Code, so it gets its own bundle
+	const webviewContext = await esbuild.context({
+		entryPoints: [
+			'src/webview/main.ts'
+		],
+		bundle: true,
+		format: 'iife',
+		minify: production,
+		sourcemap: !production,
+		sourcesContent: false,
+		platform: 'browser',
+		outfile: 'dist/webview.js',
+		logLevel: 'silent',
+		plugins: [
+			esbuildProblemMatcherPlugin,
+		],
+	});
+
+	const contexts = [extensionContext, webviewContext];
+	for (const ctx of contexts) {
+		if (watch) {
+			await ctx.watch();
+		} else {
+			await ctx.rebuild();
+			await ctx.dispose();
+		}
 	}
 }
 

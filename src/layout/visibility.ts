@@ -1,9 +1,9 @@
 import { ROOT_ID } from '../graph/types';
 
-// how many children a folder shows, and how many more each click reveals
+// how many children a parent shows, and how many more each click reveals
 export const CHILD_LIMIT = 5;
 
-// stands in for the children a folder is hiding, shown as "+N more"
+// stands in for the children a parent is hiding, shown as "+N more"
 export interface MoreBox {
 	id: string;
 	parent: string;
@@ -16,10 +16,10 @@ export interface VisibleGraph {
 }
 
 /**
- * Finds the nodes to show, given which folders are expanded.
+ * Finds the nodes to show, given which nodes are expanded.
  * @param childrenById The lookup from indexChildren.
- * @param expanded The ids of the expanded folders. The root is always open.
- * @param revealed How many children each folder shows, for folders past the default limit.
+ * @param expanded The ids of the expanded nodes. The root is always open.
+ * @param revealed How many children each parent shows, for parents past the default limit.
  * @returns The visible node ids, parents before their children, and any "+N more" boxes.
  */
 export function getVisibleNodes(

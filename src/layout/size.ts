@@ -1,4 +1,5 @@
 import { importanceScore } from '../analysis/metrics';
+import { Size } from './geometry';
 
 // box sizes in pixels, starting guesses to tune once the graph is on screen
 const MIN_WIDTH = 120;
@@ -12,10 +13,10 @@ const MAX_SCORE = 16;
 /**
  * Works out how big a node's box should be.
  * @param childCount The node's direct children.
- * @param indegree The imports entering the node from outside it.
+ * @param indegree The edges entering the node from outside it.
  * @returns The box width and height in pixels.
  */
-export function nodeSize(childCount: number, indegree: number): { width: number; height: number } {
+export function nodeSize(childCount: number, indegree: number): Size {
 	const score = importanceScore(childCount, indegree);
 	const scale = Math.min(score / MAX_SCORE, 1);
 

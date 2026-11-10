@@ -2,7 +2,7 @@ import { Edge, Node } from '../graph/types';
 import { getLineage } from './lookups';
 
 /**
- * Counts the imports entering each node from outside it.
+ * Counts the edges entering each node from outside it.
  * @param nodesById Every node in the graph, by id.
  * @param edges Every edge in the graph.
  * @returns A map from node id to its indegree.
@@ -32,22 +32,22 @@ export function computeIndegrees(nodesById: Map<string, Node>, edges: Edge[]): M
 /**
  * Scores how much a node matters, from its size and how much depends on it.
  * @param childCount The node's direct children.
- * @param indegree The imports entering the node from outside it.
- * @returns 0 for a lone file nothing imports, growing slowly from there.
+ * @param indegree The edges entering the node from outside it.
+ * @returns 0 for a lone node with no incoming edges, growing slowly from there.
  */
 export function importanceScore(childCount: number, indegree: number): number {
-	// log2 stops one heavily imported file from dwarfing everything else
+	// log2 stops one node with many incoming edges from dwarfing everything else
 	return Math.log2(1 + childCount) + 2 * Math.log2(1 + indegree);
 }
 
 /**
- * Sorts a folder's children, most important first.
+ * Sorts a parent's children, most important first.
  * @param childIds The ids to sort.
  * @param nodesById Every node in the graph, by id.
  * @param indegrees Every node's indegree, by id.
  * @returns A sorted copy: highest indegree, then most children, then alphabetical.
  */
-export function sortChildrenOfFolder(
+export function sortChildren(
 	childIds: string[],
 	nodesById: Map<string, Node>,
 	indegrees: Map<string, number>,
@@ -70,20 +70,20 @@ export function sortChildrenOfFolder(
 }
 
 /**
- * Sorts every folder's children. Call this once per graph and share the result.
+ * Sorts every parent's children. Call this once per graph and share the result.
  * @param childrenById The lookup from indexChildren.
  * @param nodesById Every node in the graph, by id.
  * @param indegrees Every node's indegree, by id.
- * @returns A new lookup with each folder's children sorted by importance.
+ * @returns A new lookup with each parent's children sorted by importance.
  */
-export function sortChildrenOfAllFolders(
+export function sortAllChildren(
 	childrenById: Map<string, string[]>,
 	nodesById: Map<string, Node>,
 	indegrees: Map<string, number>,
 ): Map<string, string[]> {
 	const sortedChildrenById = new Map<string, string[]>();
-	for (const [folderId, childIds] of childrenById) {
-		sortedChildrenById.set(folderId, sortChildrenOfFolder(childIds, nodesById, indegrees));
+	for (const [parentId, childIds] of childrenById) {
+		sortedChildrenById.set(parentId, sortChildren(childIds, nodesById, indegrees));
 	}
 	return sortedChildrenById;
 }
