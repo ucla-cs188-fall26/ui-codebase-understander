@@ -372,6 +372,13 @@ suite('chooseSides', () => {
 		assert.deepStrictEqual(chooseSides(middle, below), { fromSide: 'bottom', toSide: 'top' });
 		assert.deepStrictEqual(chooseSides(middle, above), { fromSide: 'top', toSide: 'bottom' });
 	});
+
+	test('connects a box to a long thin strip below it by their facing sides, not the strip\'s far end', () => {
+		// the strip's center is far to the right, but it runs right under the box
+		const strip = { x: 0, y: 400, width: 2000, height: 16 };
+
+		assert.deepStrictEqual(chooseSides(middle, strip), { fromSide: 'bottom', toSide: 'top' });
+	});
 });
 
 suite('placeArrows', () => {

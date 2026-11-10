@@ -13,7 +13,8 @@ function centerOf(rect: Rect): Position {
 }
 
 /**
- * Picks the side of each box an arrow should use: the sides that face each other.
+ * Picks the side of each box an arrow should use: the sides that face each other. It goes by the gaps between the
+ * boxes' edges, not their centers, so a long thin box like a strip connects on the side that faces the other box.
  * @param from The box the arrow leaves.
  * @param to The box the arrow enters.
  * @returns The side on each box.
@@ -26,8 +27,14 @@ export function chooseSides(from: Rect, to: Rect): { fromSide: Side; toSide: Sid
 	const dx = toCenter.x - fromCenter.x;
 	const dy = toCenter.y - fromCenter.y;
 
-	// more side by side than stacked: use left and right sides. Ties go sideways, the way the layout flows
-	if (Math.abs(dx) >= Math.abs(dy)) {
+	// how far apart the edges are, sideways and up-and-down; below zero means their ranges overlap that way
+	const gapAcross = Math.max(to.x - (from.x + from.width), from.x - (to.x + to.width));
+	const gapDown = Math.max(to.y - (from.y + from.height), from.y - (to.y + to.height));
+
+	// apart more sideways than up and down: use left and right sides. Overlapping both ways (one inside the other)
+	// falls back to the centers. Ties go sideways, the way the layout flows
+	const sideways = gapAcross < 0 && gapDown < 0 ? Math.abs(dx) >= Math.abs(dy) : gapAcross >= gapDown;
+	if (sideways) {
 		if (dx >= 0) {
 			return { fromSide: 'right', toSide: 'left' };
 		}
