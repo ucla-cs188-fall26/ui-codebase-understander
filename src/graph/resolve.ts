@@ -26,8 +26,8 @@ export function resolveImport(importPath: string, fromFile: string, files: Set<s
 	}
 
 	// repo path of the import, e.g. src + ./lib/b = src/lib/b
-	const fromFolder = posix.dirname(fromFile);
-	const basePath = posix.join(fromFolder, importPath);
+	const fromDirectory = posix.dirname(fromFile);
+	const basePath = posix.join(fromDirectory, importPath);
 
 	// import already has its full filename
 	if (files.has(basePath)) {
@@ -53,7 +53,7 @@ export function resolveImport(importPath: string, fromFile: string, files: Set<s
 		}
 	}
 
-	// import is a folder, e.g. ./utils = src/utils/index.ts
+	// import is a directory, e.g. ./utils = src/utils/index.ts
 	for (const extension of EXTENSIONS) {
 		const candidate = posix.join(basePath, 'index' + extension);
 		if (files.has(candidate)) {

@@ -1,4 +1,4 @@
-export type NodeKind = 'repo' | 'folder' | 'file'; // add class/function later
+export type NodeKind = 'repo' | 'directory' | 'file'; // add class/function later
 export type EdgeKind = 'import'; // add call/reference later
 
 export const ROOT_ID = '.';

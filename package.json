@@ -17,8 +17,29 @@
         "command": "codeflow-visualizer.openGraph",
         "title": "Open Graph",
         "category": "Codeflow"
+      },
+      {
+        "command": "codeflow-visualizer.resetLayout",
+        "title": "Reset Layout",
+        "category": "Codeflow",
+        "icon": "$(discard)"
       }
-    ]
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "codeflow-visualizer.resetLayout",
+          "when": "activeWebviewPanelId == 'codeflowGraph'",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "codeflow-visualizer.resetLayout",
+          "when": "activeWebviewPanelId == 'codeflowGraph'"
+        }
+      ]
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run package",

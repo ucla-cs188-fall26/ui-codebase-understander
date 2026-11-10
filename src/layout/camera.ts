@@ -1,4 +1,4 @@
-import { Position } from './geometry';
+import { Position, Rect } from './geometry';
 
 // how far you can zoom out and in
 export const MIN_SCALE = 0.2;
@@ -29,6 +29,34 @@ export function zoomAt(camera: Camera, pointer: Position, factor: number): Camer
 	return {
 		x: pointer.x - worldX * scale,
 		y: pointer.y - worldY * scale,
+		scale: scale,
+	};
+}
+
+/**
+ * Picks the camera that shows all of some content, centered, with a margin around it.
+ * @param content The area to show, in world pixels, like the bounds of every box.
+ * @param viewport The part of the screen to show it in, in screen pixels.
+ * @param margin Space to leave between the content and the viewport's edges, in screen pixels.
+ * @returns The camera. It zooms out as far as needed (down to MIN_SCALE) but never in past 1.
+ */
+export function fitCamera(content: Rect, viewport: Rect, margin: number): Camera {
+	const availableWidth = viewport.width - 2 * margin;
+	const availableHeight = viewport.height - 2 * margin;
+
+	// the smaller ratio, so the content fits both ways; never enlarged, since a small graph is fine at full size
+	const fittingScale = Math.min(availableWidth / content.width, availableHeight / content.height);
+	const scale = Math.min(1, Math.max(MIN_SCALE, fittingScale));
+
+	// put the content's center at the viewport's center
+	const contentCenterX = content.x + content.width / 2;
+	const contentCenterY = content.y + content.height / 2;
+	const viewportCenterX = viewport.x + viewport.width / 2;
+	const viewportCenterY = viewport.y + viewport.height / 2;
+
+	return {
+		x: viewportCenterX - contentCenterX * scale,
+		y: viewportCenterY - contentCenterY * scale,
 		scale: scale,
 	};
 }

@@ -1,5 +1,5 @@
 import { Edge, Graph, Node, ROOT_ID } from '../graph/types';
-import { liftEdges } from '../analysis/edges';
+import { isInside, liftEdges } from '../analysis/edges';
 import { indexChildren, indexNodes } from '../analysis/lookups';
 import { computeIndegrees, sortAllChildren } from '../analysis/metrics';
 import { defaultLayout } from './defaultLayout';
@@ -222,15 +222,61 @@ export function layOutChildren(state: LayoutState, info: GraphInfo, parentId: st
 		}
 	}
 
+	// closed sizes, even for open children: homes mean "where things go when closed",
+	// and arrangeChildren makes room for open boxes on top of that
 	const sizes = new Map<string, Size>();
 	for (const id of childIds) {
-		sizes.set(id, boxSize(state, info, id));
+		sizes.set(id, closedSize(state, info, id));
 	}
 
 	const positions = defaultLayout(childIds, edges, sizes);
 	for (const [id, position] of positions) {
 		state.homes.set(id, position);
 	}
+}
+
+/**
+ * Puts a box and everything inside it back to how it first looked: the default layout and sizes, with every box
+ * inside it closed. The box itself stays open or closed. Resetting the root resets the whole graph.
+ * @param state The view state.
+ * @param info The graph lookups.
+ * @param id The box to reset.
+ */
+export function resetNode(state: LayoutState, info: GraphInfo, id: string): void {
+	state.closedSizes.delete(id);
+	state.openSizes.delete(id);
+
+	// forget everything about what's inside it, at every depth: where it goes, its size, and whether it's open
+	for (const nodeId of info.nodesById.keys()) {
+		if (nodeId !== id && isInside(nodeId, id, info.nodesById)) {
+			state.homes.delete(nodeId);
+			state.closedSizes.delete(nodeId);
+			state.openSizes.delete(nodeId);
+			state.expanded.delete(nodeId);
+		}
+	}
+
+	// if the box is open, its children have no homes now, so they get the default layout again
+	if (state.expanded.has(id)) {
+		layOutChildren(state, info, id);
+	}
+}
+
+/**
+ * Moves a box to a new home within its parent.
+ * @param state The view state.
+ * @param info The graph lookups.
+ * @param id The box.
+ * @param home Where it should go, relative to the inside of its parent. Past the parent's right or bottom edge is
+ *   fine, since the parent grows to fit; past its left or top edge stops at the edge, since those never move.
+ *   The root is the whole page and has no edges, so its children can go anywhere.
+ */
+export function moveTo(state: LayoutState, info: GraphInfo, id: string, home: Position): void {
+	if (info.nodesById.get(id)!.parent === ROOT_ID) {
+		state.homes.set(id, home);
+		return;
+	}
+	state.homes.set(id, { x: Math.max(0, home.x), y: Math.max(0, home.y) });
 }
 
 /**

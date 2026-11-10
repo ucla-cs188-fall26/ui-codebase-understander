@@ -33,7 +33,7 @@ export function indexChildren(nodes: Node[]): Map<string, string[]> {
 }
 
 /**
- * Groups nodes under their parents, for showing a list folder by folder.
+ * Groups nodes under their parents, for showing a list directory by directory.
  * @param ids The nodes to group.
  * @param nodesById Every node in the graph, by id.
  * @returns A map from each parent's id to its nodes from the list. Parents are sorted by path, and nodes by id.

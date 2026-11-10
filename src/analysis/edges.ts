@@ -67,7 +67,7 @@ export function isInside(nodeId: string, containerId: string, nodesById: Map<str
 }
 
 /**
- * Lists what a node connects to across its boundary: for a folder, edges between its insides and the rest of the graph.
+ * Lists what a node connects to across its boundary: for a directory, edges between its insides and the rest of the graph.
  * @param id The node.
  * @param edges Every edge in the graph.
  * @param nodesById Every node in the graph, by id.

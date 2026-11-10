@@ -4,16 +4,16 @@ import { buildEdges, buildTree } from '../graph/build';
 import { CODE_EXTENSIONS, scanImports } from '../graph/imports';
 import { Graph } from '../graph/types';
 
-// folders that are generated or installed rather than written by hand
+// directories that are generated or installed rather than written by hand
 const EXCLUDE_GLOB = '**/{node_modules,.git,dist,out}/**';
 
 /**
  * Builds the graph for a workspace folder.
- * @param folder The folder to scan.
- * @returns Every file and folder as nodes, and every file-to-file import as edges.
+ * @param workspaceFolder The workspace folder to scan.
+ * @returns Every file and directory as nodes, and every file-to-file import as edges.
  */
-export async function loadGraph(folder: vscode.WorkspaceFolder): Promise<Graph> {
-	const pattern = new vscode.RelativePattern(folder, '**/*');
+export async function loadGraph(workspaceFolder: vscode.WorkspaceFolder): Promise<Graph> {
+	const pattern = new vscode.RelativePattern(workspaceFolder, '**/*');
 	const uris = await vscode.workspace.findFiles(pattern, EXCLUDE_GLOB);
 
 	const decoder = new TextDecoder();
@@ -32,7 +32,7 @@ export async function loadGraph(folder: vscode.WorkspaceFolder): Promise<Graph> 
 		importsByFile.set(path, scanImports(decoder.decode(bytes)));
 	}
 
-	const nodes = buildTree(folder.name, Array.from(importsByFile.keys()));
+	const nodes = buildTree(workspaceFolder.name, Array.from(importsByFile.keys()));
 	const edges = buildEdges(importsByFile);
 	return { nodes: nodes, edges: edges };
 }

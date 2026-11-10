@@ -1,7 +1,7 @@
 // The module 'vscode' contains the VS Code extensibility API
 // Import the module and reference it with the alias vscode in your code below
 import * as vscode from 'vscode';
-import { openGraphPanel } from './panel';
+import { openGraphPanel, resetLayout } from './panel';
 
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
@@ -21,6 +21,10 @@ export function activate(context: vscode.ExtensionContext) {
 	});
 
 	context.subscriptions.push(disposable);
+
+	// Shown in the graph tab's toolbar and the Command Palette while the graph is open
+	const resetCommand = vscode.commands.registerCommand('codeflow-visualizer.resetLayout', resetLayout);
+	context.subscriptions.push(resetCommand);
 }
 
 // This method is called when your extension is deactivated

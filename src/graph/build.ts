@@ -15,12 +15,12 @@ export function buildTree(repoName: string, paths: string[]): Node[] {
         }],
 	]);
 
-	function addNode(id: string, kind: 'folder' | 'file'): void {
+	function addNode(id: string, kind: 'directory' | 'file'): void {
 		const parent = posix.dirname(id);
 
         // add parent Node to hm
 		if (!nodes.has(parent)) {
-			addNode(parent, 'folder');
+			addNode(parent, 'directory');
 		}
 
         // add Node to hm

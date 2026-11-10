@@ -1,13 +1,16 @@
 import { NodeKind, ROOT_ID } from '../graph/types';
 import { ExtensionToWebview, WebviewToExtension } from '../messages';
-import { connections } from '../analysis/edges';
+import { connections, isInside } from '../analysis/edges';
 import { getLineage, groupByParent } from '../analysis/lookups';
 import { GAP } from '../layout/defaultLayout';
 import { Arrow, arrowPath, placeArrows } from '../layout/arrows';
-import { Camera, zoomAt } from '../layout/camera';
+import { Camera, fitCamera, zoomAt } from '../layout/camera';
 import { nodeSize } from '../layout/size';
-import { Position } from '../layout/geometry';
-import { buildGraphInfo, closeNode, createLayoutState, GraphInfo, LayoutState, openNode, shownChildren } from '../layout/state';
+import { boundsOf, Position, Rect } from '../layout/geometry';
+import { buildGraphInfo, closeNode, createLayoutState, GraphInfo, layOutChildren, LayoutState, moveTo, openNode, resetNode, shownChildren } from '../layout/state';
+import { fromSaved, toSaved } from '../layout/saved';
+import { settleDrop } from '../layout/drop';
+import { makeCloseIcon, makeFitIcon, makeGripIcon, makeOpenIcon, makeResetIcon, SVG_NS } from './icons';
 import { arrowZIndex, boxZIndexes, placeBoxes, visibleEdges } from '../layout/place';
 
 // VS Code provides this once per webview; calling it a second time throws
@@ -18,10 +21,13 @@ const vscode = acquireVsCodeApi();
 const START_X = 40;
 const START_Y = 40;
 
+// added to the z-index of a dragged box and everything inside it, so they paint above every other box and arrow
+const DRAG_RAISE = 100000;
+
 /**
  * Makes one box element.
  * @param label The text inside the box.
- * @param kind A class for styling: 'repo', 'folder', 'file', or 'more'.
+ * @param kind A class for styling: 'repo', 'directory', 'file', or 'more'.
  * @param x The left edge, in pixels.
  * @param y The top edge, in pixels.
  * @param width The width, in pixels.
@@ -36,16 +42,18 @@ function makeBox(label: string, kind: string, x: number, y: number, width: numbe
 	box.style.width = width + 'px';
 	box.style.height = height + 'px';
 
+	// the title: all of a closed box, the strip across the top of an open one; it's where you grab a box to move it
+	const title = document.createElement('div');
+	title.className = 'box-title';
+	box.appendChild(title);
+
 	const text = document.createElement('span');
 	text.className = 'label';
 	text.textContent = label;
-	box.appendChild(text);
+	title.appendChild(text);
 
 	return box;
 }
-
-// SVG elements need this namespace, or the browser treats them as unknown HTML tags
-const SVG_NS = 'http://www.w3.org/2000/svg';
 
 /**
  * Makes the arrowhead shape every arrow points with. Arrows anywhere on the page can use it as url(#arrowhead).
@@ -112,12 +120,22 @@ function drawGraph(): void {
 	}
 
 	const rects = placeBoxes(state, info, { x: START_X, y: START_Y });
+	lastRects = rects;
 
 	const world = document.getElementById('world')!;
 	world.replaceChildren();
 
 	// paint order: each box gets a z-index, and each arrow sits just above the open boxes holding its ends
 	const boxZ = boxZIndexes(rects);
+
+	// while dragging, the box and everything inside it paint above the rest as one unit
+	if (isDragging && drag !== undefined) {
+		for (const [id, z] of boxZ) {
+			if (isInside(id, drag.id, info.nodesById)) {
+				boxZ.set(id, z + DRAG_RAISE);
+			}
+		}
+	}
 	world.appendChild(makeArrowheadDefs());
 	const edges = visibleEdges(state, info, rects);
 	const arrows = placeArrows(edges, rects);
@@ -153,8 +171,14 @@ function drawGraph(): void {
 			const chevron = document.createElement('span');
 			chevron.className = 'chevron';
 			chevron.textContent = isOpen ? '▾' : '▸';
-			box.prepend(chevron);
+			box.querySelector('.box-title')!.prepend(chevron);
 		}
+
+		// a grip at the title's right end, so it's clear the title is where to grab the box
+		const grip = document.createElement('span');
+		grip.className = 'grip';
+		grip.appendChild(makeGripIcon());
+		box.querySelector('.box-title')!.appendChild(grip);
 
 		world.appendChild(box);
 	}
@@ -173,6 +197,9 @@ function drawGraph(): void {
 
 	// keep the sidebar in step with the selection
 	drawSidebar();
+
+	// whatever changed, store it for next time
+	scheduleSave();
 }
 
 // the current graph's lookups, and what's open and where; undefined until a graph arrives
@@ -181,6 +208,9 @@ let state: LayoutState = createLayoutState();
 
 // the node whose details the sidebar shows, or undefined when nothing is selected
 let selectedId: string | undefined = undefined;
+
+// every box drawn last time, so Fit to view can measure what's on screen
+let lastRects = new Map<string, Rect>();
 
 /**
  * Shows the selected node's details in the sidebar, or hides the sidebar when nothing is selected.
@@ -210,8 +240,32 @@ function drawSidebar(): void {
 
 	sidebar.appendChild(header);
 
+	// what you can do with this node, before the details you read
+	const actions = document.createElement('div');
+	actions.className = 'sidebar-actions';
+
+	// short labels so both buttons fit on one line; the tooltip says it in full
+	const open = makeTextButton(makeOpenIcon(), node.kind === 'file' ? 'Open' : 'Show');
+	open.title = node.kind === 'file' ? 'Open in editor' : 'Show in Explorer';
+	open.dataset.path = node.path;
+	open.dataset.kind = node.kind;
+	open.addEventListener('click', handleOpenClick);
+	actions.appendChild(open);
+
+	// only directories have an arrangement inside them to reset
+	if (node.kind !== 'file') {
+		const reset = makeTextButton(makeResetIcon(), 'Reset layout');
+		reset.title = 'Reset everything inside this node';
+		reset.addEventListener('click', handleResetClick);
+		actions.appendChild(reset);
+	}
+
+	sidebar.appendChild(actions);
+
 	const pathRow = addDetail(sidebar, 'Path', node.path);
 	pathRow.querySelector('.sidebar-value')!.replaceChildren(pathWithBreaks(node.path));
+
+	// the same small arrow as the import lists, as a second way to open it right where you're reading
 	pathRow.appendChild(makeOpenButton(node.path, node.kind));
 	addDetail(sidebar, 'Kind', node.kind);
 	if (node.kind !== 'file') {
@@ -252,6 +306,50 @@ function addDetail(sidebar: HTMLElement, label: string, value: string): HTMLElem
 }
 
 /**
+ * Makes a gray button with an icon and a label, like VS Code's secondary buttons.
+ * @param icon The icon, from icons.ts.
+ * @param label The words on the button.
+ * @returns The button, with no click handler yet.
+ */
+function makeTextButton(icon: SVGSVGElement, label: string): HTMLButtonElement {
+	const button = document.createElement('button');
+	button.className = 'text-button';
+	button.appendChild(icon);
+	button.append(label);
+	return button;
+}
+
+/**
+ * Clears the selection if something above the selected node has just closed, so the sidebar doesn't keep describing
+ * a node you can no longer see. A node merely behind "+N more" stays selected, since its directories are open.
+ */
+function clearSelectionIfClosedAway(): void {
+	if (info === undefined || selectedId === undefined) {
+		return;
+	}
+
+	// the lineage starts with the node itself, which may be closed; only the nodes above it matter
+	const ancestors = getLineage(selectedId, info.nodesById).slice(1);
+	for (const ancestorId of ancestors) {
+		if (!state.expanded.has(ancestorId)) {
+			selectedId = undefined;
+			return;
+		}
+	}
+}
+
+/**
+ * Resets the selected node and everything inside it to the default layout.
+ */
+function handleResetClick(): void {
+	if (info === undefined || selectedId === undefined) {
+		return;
+	}
+	resetNode(state, info, selectedId);
+	drawGraph();
+}
+
+/**
  * Writes a path so that, when it has to wrap, it wraps after a slash rather than mid-name.
  * @param path A path like tests/integration/admin.test.js.
  * @returns The path's text with a line-break opportunity (a wbr element) after each slash.
@@ -270,25 +368,7 @@ function pathWithBreaks(path: string): DocumentFragment {
 }
 
 /**
- * Draws an arrow pointing up and right, the usual sign for "open elsewhere".
- * @returns A 16×16 svg.
- */
-function makeOpenIcon(): SVGSVGElement {
-	const svg = document.createElementNS(SVG_NS, 'svg');
-	svg.setAttribute('width', '16');
-	svg.setAttribute('height', '16');
-	svg.setAttribute('viewBox', '0 0 16 16');
-
-	// the arrow's corner, then its shaft
-	const lines = document.createElementNS(SVG_NS, 'path');
-	lines.setAttribute('d', 'M 6 4 H 12 V 10 M 12 4 L 4 12');
-	svg.appendChild(lines);
-
-	return svg;
-}
-
-/**
- * Makes a button that opens a file in the editor, or shows a folder in the Explorer.
+ * Makes a button that opens a file in the editor, or shows a directory in the Explorer.
  * @param path The node's repo-relative path.
  * @param kind The node's kind, which decides what opening means.
  * @returns The button.
@@ -336,12 +416,12 @@ function addConnectionList(sidebar: HTMLElement, title: string, ids: string[]): 
 		return;
 	}
 
-	// folder by folder: each folder as a heading you can jump to, then its files by name
+	// directory by directory: each directory as a heading you can jump to, then its files by name
 	for (const [parentId, childIds] of groupByParent(ids, info!.nodesById)) {
-		// files at the top of the repo have no folder, so they get no heading and no indent
+		// files at the top of the repo have no directory, so they get no heading and no indent
 		const isTopLevel = parentId === ROOT_ID;
 		if (!isTopLevel) {
-			sidebar.appendChild(makeLinkRow(parentId, parentId + '/', 'sidebar-folder'));
+			sidebar.appendChild(makeLinkRow(parentId, parentId + '/', 'sidebar-directory'));
 		}
 
 		for (const id of childIds) {
@@ -355,7 +435,7 @@ function addConnectionList(sidebar: HTMLElement, title: string, ids: string[]): 
  * Makes one sidebar row that jumps to a node when clicked, with a button to open it.
  * @param id The node.
  * @param text What the row says.
- * @param extraClass A class for how the row looks, like a folder heading or an indented file.
+ * @param extraClass A class for how the row looks, like a directory heading or an indented file.
  * @returns The row.
  */
 function makeLinkRow(id: string, text: string, extraClass: string): HTMLElement {
@@ -381,9 +461,6 @@ function makeLinkRow(id: string, text: string, extraClass: string): HTMLElement 
  * @param event The browser's mouse event. Its currentTarget is the row, which carries the node's id.
  */
 function handleConnectionClick(event: MouseEvent): void {
-	// redrawing removes this row from the page, so the body's click handler would mistake it for empty space
-	event.stopPropagation();
-
 	const id = (event.currentTarget as HTMLElement).dataset.id!;
 	revealNode(id);
 	selectedId = id;
@@ -414,16 +491,42 @@ function centerOn(id: string): void {
 	const middleX = (window.innerWidth - SIDEBAR_SPACE) / 2;
 	const middleY = window.innerHeight / 2;
 
-	camera = { x: middleX - boxCenterX * camera.scale, y: middleY - boxCenterY * camera.scale, scale: camera.scale };
+	glideTo({ x: middleX - boxCenterX * camera.scale, y: middleY - boxCenterY * camera.scale, scale: camera.scale });
+}
 
-	// glide there, then switch the transition off so panning by hand stays instant
+// space left around everything when fitting it in view, in screen pixels
+const FIT_MARGIN = 40;
+
+/**
+ * Moves and zooms the view so every visible box fits in the part of the panel you can see.
+ */
+function fitToView(): void {
+	const bounds = boundsOf(lastRects.values());
+	if (bounds === undefined) {
+		return;
+	}
+
+	// leave out the space under the sidebar card when it's showing
+	const sidebarShowing = document.getElementById('sidebar')!.classList.contains('visible');
+	const width = sidebarShowing ? window.innerWidth - SIDEBAR_SPACE : window.innerWidth;
+	const viewport = { x: 0, y: 0, width: width, height: window.innerHeight };
+
+	glideTo(fitCamera(bounds, viewport, FIT_MARGIN));
+}
+
+/**
+ * Animates the view to a new camera, then switches the animation off so panning by hand stays instant.
+ * @param target Where the camera should end up.
+ */
+function glideTo(target: Camera): void {
+	camera = target;
 	document.getElementById('world')!.classList.add('gliding');
 	applyCamera();
 	setTimeout(stopGliding, GLIDE_TIME);
 }
 
 /**
- * Turns off the glide animation after centerOn.
+ * Turns off the glide animation after glideTo.
  */
 function stopGliding(): void {
 	document.getElementById('world')!.classList.remove('gliding');
@@ -447,23 +550,6 @@ function revealNode(id: string): void {
 }
 
 /**
- * Draws an X as two crossing lines, so it is symmetric whatever the font.
- * @returns A 16×16 svg.
- */
-function makeCloseIcon(): SVGSVGElement {
-	const svg = document.createElementNS(SVG_NS, 'svg');
-	svg.setAttribute('width', '16');
-	svg.setAttribute('height', '16');
-	svg.setAttribute('viewBox', '0 0 16 16');
-
-	const lines = document.createElementNS(SVG_NS, 'path');
-	lines.setAttribute('d', 'M 4 4 L 12 12 M 12 4 L 4 12');
-	svg.appendChild(lines);
-
-	return svg;
-}
-
-/**
  * Clears the selection, which hides the sidebar.
  */
 function handleSidebarClose(): void {
@@ -472,12 +558,44 @@ function handleSidebarClose(): void {
 }
 
 /**
- * Checks whether an event happened inside the sidebar, which handles its own clicks and scrolling.
+ * Checks whether an event happened on the sidebar or toolbar, which float over the graph and handle their own
+ * clicks and scrolling.
  * @param event Any browser event.
- * @returns True if its target is in the sidebar.
+ * @returns True if its target is in either.
  */
-function isInSidebar(event: Event): boolean {
-	return (event.target as Element).closest('#sidebar') !== null;
+function isOnOverlay(event: Event): boolean {
+	// the path is recorded when the event starts, so it still holds the sidebar
+	// even if a redraw has since removed the element that was clicked
+	const path = event.composedPath();
+	return path.includes(document.getElementById('sidebar')!) || path.includes(document.getElementById('toolbar')!);
+}
+
+/**
+ * Fills in the toolbar in the top-left corner. Runs once, since its buttons never change.
+ */
+function drawToolbar(): void {
+	const toolbar = document.getElementById('toolbar')!;
+
+	const reset = document.createElement('button');
+	reset.className = 'icon-button';
+	reset.title = 'Reset layout';
+	reset.appendChild(makeResetIcon());
+	reset.addEventListener('click', handleToolbarReset);
+	toolbar.appendChild(reset);
+
+	const fit = document.createElement('button');
+	fit.className = 'icon-button';
+	fit.title = 'Fit to view';
+	fit.appendChild(makeFitIcon());
+	fit.addEventListener('click', fitToView);
+	toolbar.appendChild(fit);
+}
+
+/**
+ * Asks the extension to reset the whole layout; it confirms first, since only it can show VS Code's dialogs.
+ */
+function handleToolbarReset(): void {
+	vscode.postMessage({ type: 'requestReset' });
 }
 
 // how the world is shown; kept between redraws so new data doesn't reset the view
@@ -492,6 +610,31 @@ const ZOOM_SPEED = 0.005;
 function applyCamera(): void {
 	const world = document.getElementById('world')!;
 	world.style.transform = 'translate(' + camera.x + 'px, ' + camera.y + 'px) scale(' + camera.scale + ')';
+	scheduleSave();
+}
+
+// how long to wait after the last change before saving, so a pan saves once instead of on every move
+const SAVE_DELAY = 500;
+
+// the pending save, so a newer change can push it back
+let saveTimer: ReturnType<typeof setTimeout> | undefined = undefined;
+
+/**
+ * Saves the layout once changes have paused for SAVE_DELAY.
+ */
+function scheduleSave(): void {
+	clearTimeout(saveTimer);
+	saveTimer = setTimeout(saveLayout, SAVE_DELAY);
+}
+
+/**
+ * Sends the layout and camera to the extension, which stores them for this workspace.
+ */
+function saveLayout(): void {
+	if (info === undefined) {
+		return;
+	}
+	vscode.postMessage({ type: 'saveLayout', layout: toSaved(state, camera) });
 }
 
 /**
@@ -500,7 +643,7 @@ function applyCamera(): void {
  */
 function handleWheel(event: WheelEvent): void {
 	// let the sidebar scroll its own lists
-	if (isInSidebar(event)) {
+	if (isOnOverlay(event)) {
 		return;
 	}
 	event.preventDefault();
@@ -511,8 +654,11 @@ function handleWheel(event: WheelEvent): void {
 	applyCamera();
 }
 
-// where the mouse was at the last move while panning, or undefined when not panning
+// where the mouse was at the last move of a press that may pan, or undefined when no such press is happening
 let panLast: Position | undefined = undefined;
+
+// whether that press has moved far enough to really be panning, rather than a click
+let isPanning = false;
 
 // where the latest press started, so a click that was really a drag can be ignored
 let pressStart: Position = { x: 0, y: 0 };
@@ -521,31 +667,66 @@ let pressStart: Position = { x: 0, y: 0 };
 const CLICK_SLOP = 4;
 
 /**
- * Starts panning when the press lands on empty space, not on a box.
+ * Checks whether a press is on the part of the selected box that moves it: all of it when closed, its title strip
+ * when open. Only the selected box can be moved, so everything else is free for panning.
+ * @param target The element pressed.
+ * @returns True if pressing there should move the box rather than the view.
+ */
+function isOnGrabArea(target: Element): boolean {
+	const box = target.closest<HTMLElement>('.box');
+	if (box === null || box.dataset.id !== selectedId) {
+		return false;
+	}
+	return !box.classList.contains('open') || target.closest('.box-title') !== null;
+}
+
+/**
+ * Notes a press that may become a pan: anywhere but the floating panels, a box's arrow, or the selected box's grab
+ * area. Panning only starts once the mouse moves, so a press without movement stays a click.
  * @param event The browser's pointer event.
  */
 function handlePointerDown(event: PointerEvent): void {
 	pressStart = { x: event.clientX, y: event.clientY };
 
 	const target = event.target as Element;
-	if (target.closest('.box') !== null || isInSidebar(event)) {
+	if (isOnOverlay(event) || target.closest('.chevron') !== null) {
+		return;
+	}
+
+	// the selected box's grab area moves the box; anywhere else may become a pan
+	if (isOnGrabArea(target) && selectedId !== undefined) {
+		drag = { id: selectedId, startHome: state.homes.get(selectedId)!, startMouse: pressStart };
 		return;
 	}
 
 	panLast = { x: event.clientX, y: event.clientY };
-
-	// keep receiving moves even if the mouse leaves the panel mid-drag
-	document.body.setPointerCapture(event.pointerId);
-	document.body.classList.add('panning');
 }
 
 /**
- * Moves the world along with the mouse while panning.
+ * Moves the world along with the mouse, once a press has moved past CLICK_SLOP.
  * @param event The browser's pointer event.
  */
 function handlePointerMove(event: PointerEvent): void {
+	if (drag !== undefined) {
+		moveDraggedBox(event);
+		return;
+	}
+
 	if (panLast === undefined) {
 		return;
+	}
+
+	if (!isPanning) {
+		const moved = Math.hypot(event.clientX - pressStart.x, event.clientY - pressStart.y);
+		if (moved <= CLICK_SLOP) {
+			return;
+		}
+
+		// now it's a pan: keep receiving moves even if the mouse leaves the panel mid-drag. Starting this only now
+		// matters, since capturing sends the coming click to the body instead of the box under the mouse
+		isPanning = true;
+		document.body.setPointerCapture(event.pointerId);
+		document.body.classList.add('panning');
 	}
 
 	camera = { x: camera.x + event.clientX - panLast.x, y: camera.y + event.clientY - panLast.y, scale: camera.scale };
@@ -554,11 +735,62 @@ function handlePointerMove(event: PointerEvent): void {
 }
 
 /**
- * Stops panning.
+ * Ends the press, and the pan if there was one.
  */
 function handlePointerUp(): void {
 	panLast = undefined;
+	isPanning = false;
 	document.body.classList.remove('panning');
+
+	if (drag !== undefined) {
+		const droppedId = drag.id;
+		const wasDragging = isDragging;
+		drag = undefined;
+		isDragging = false;
+		document.body.classList.remove('dragging');
+
+		// push what it landed on out of the way, then redraw in the normal paint order, which also saves
+		if (wasDragging && info !== undefined) {
+			settleDrop(state, info, droppedId);
+			drawGraph();
+		}
+	}
+}
+
+// the box being moved, its home and the mouse when the press started; undefined when no box is pressed
+let drag: { id: string; startHome: Position; startMouse: Position } | undefined = undefined;
+
+// whether that press has moved far enough to really be dragging, rather than a click
+let isDragging = false;
+
+/**
+ * Moves the pressed box with the mouse, once the press has moved past CLICK_SLOP.
+ * @param event The browser's pointer event.
+ */
+function moveDraggedBox(event: PointerEvent): void {
+	if (info === undefined || drag === undefined) {
+		return;
+	}
+
+	const dx = event.clientX - drag.startMouse.x;
+	const dy = event.clientY - drag.startMouse.y;
+
+	if (!isDragging) {
+		if (Math.hypot(dx, dy) <= CLICK_SLOP) {
+			return;
+		}
+
+		// now it's a drag: keep receiving moves even if the mouse leaves the panel
+		isDragging = true;
+		document.body.setPointerCapture(event.pointerId);
+		document.body.classList.add('dragging');
+	}
+
+	// screen pixels to world pixels, so the box stays under the mouse at any zoom; measured from the start of the
+	// drag, so small steps can't add up to drift
+	const home = { x: drag.startHome.x + dx / camera.scale, y: drag.startHome.y + dy / camera.scale };
+	moveTo(state, info, drag.id, home);
+	drawGraph();
 }
 
 /**
@@ -567,7 +799,7 @@ function handlePointerUp(): void {
  * @param event The browser's mouse event.
  */
 function handleClick(event: MouseEvent): void {
-	if (info === undefined || isInSidebar(event)) {
+	if (info === undefined || isOnOverlay(event)) {
 		return;
 	}
 
@@ -587,6 +819,7 @@ function handleClick(event: MouseEvent): void {
 	} else if (target.closest('.chevron') !== null) {
 		if (state.expanded.has(id)) {
 			closeNode(state, id);
+			clearSelectionIfClosedAway();
 		} else {
 			openNode(state, info, id);
 		}
@@ -605,10 +838,30 @@ function handleMessage(event: MessageEvent<ExtensionToWebview>): void {
 	if (event.data.type === 'graph') {
 		info = buildGraphInfo(event.data.graph);
 
-		// a fresh view each time for now; saved layouts come later
-		state = createLayoutState();
-		openNode(state, info, ROOT_ID);
+		// pick up where the last session left off, if anything was saved
+		if (event.data.layout !== undefined) {
+			const restored = fromSaved(event.data.layout, info);
+			state = restored.state;
+			camera = restored.camera;
+		} else {
+			state = createLayoutState();
+		}
 
+		// give homes to anything new since the save; boxes already placed keep theirs
+		for (const id of state.expanded) {
+			layOutChildren(state, info, id);
+		}
+
+		applyCamera();
+		drawGraph();
+	}
+
+	// the user ran Reset Layout: everything back to the default, including the view
+	if (event.data.type === 'resetLayout' && info !== undefined) {
+		resetNode(state, info, ROOT_ID);
+		clearSelectionIfClosedAway();
+		camera = { x: 0, y: 0, scale: 1 };
+		applyCamera();
 		drawGraph();
 	}
 }
@@ -623,4 +876,6 @@ document.body.addEventListener('pointerdown', handlePointerDown);
 document.body.addEventListener('pointermove', handlePointerMove);
 document.body.addEventListener('pointerup', handlePointerUp);
 document.body.addEventListener('click', handleClick);
+
+drawToolbar();
 vscode.postMessage({ type: 'ready' });

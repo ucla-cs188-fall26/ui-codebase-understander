@@ -7,16 +7,19 @@ import { connections, findChildContaining, liftEdges } from '../analysis/edges';
 import { assignColumns, findBackEdges } from '../layout/columns';
 import { defaultLayout, GAP } from '../layout/defaultLayout';
 import { arrowPath, chooseSides, placeArrows } from '../layout/arrows';
-import { MAX_SCALE, zoomAt } from '../layout/camera';
-import { arrangeChildren, boxSize, buildGraphInfo, childOrigin, closeNode, createLayoutState, GraphInfo, openNode } from '../layout/state';
+import { fitCamera, MAX_SCALE, zoomAt } from '../layout/camera';
+import { boundsOf } from '../layout/geometry';
+import { arrangeChildren, boxSize, buildGraphInfo, childOrigin, closeNode, createLayoutState, GraphInfo, moveTo, openNode, resetNode } from '../layout/state';
 import { arrowZIndex, boxZIndexes, placeBoxes, visibleEdges } from '../layout/place';
+import { fromSaved, toSaved } from '../layout/saved';
+import { settleDrop } from '../layout/drop';
 import { nodeSize } from '../layout/size';
 import { Edge, ROOT_ID } from '../graph/types';
 import { CHILD_LIMIT, getVisibleNodes } from '../layout/visibility';
 import { resolveImport } from '../graph/resolve';
 
 suite('buildTree', () => {
-	test('creates folders and counts direct children', () => {
+	test('creates directories and counts direct children', () => {
 		const paths = ['src/lib/b.ts', 'README.md', 'src/a.ts'];
 
 		const nodes = buildTree('repo', paths);
@@ -25,9 +28,9 @@ suite('buildTree', () => {
 		assert.deepStrictEqual(summary, [
 			['.', 'repo', null, 2],
 			['README.md', 'file', '.', 0],
-			['src', 'folder', '.', 2],
+			['src', 'directory', '.', 2],
 			['src/a.ts', 'file', 'src', 0],
-			['src/lib', 'folder', 'src', 1],
+			['src/lib', 'directory', 'src', 1],
 			['src/lib/b.ts', 'file', 'src/lib', 0],
 		]);
 	});
@@ -91,7 +94,7 @@ suite('getVisibleNodes', () => {
 		assert.deepStrictEqual(visible.nodeIds, ['.', 'README.md', 'src', 'test']);
 	});
 
-	test('goes into expanded folders and stops at collapsed ones', () => {
+	test('goes into expanded directories and stops at collapsed ones', () => {
 		const visible = getVisibleNodes(childrenById, new Set(['src']), new Map());
 
 		assert.deepStrictEqual(visible.nodeIds, ['.', 'README.md', 'src', 'src/app.ts', 'src/lib', 'test']);
@@ -99,10 +102,10 @@ suite('getVisibleNodes', () => {
 
 	suite('with more children than the limit', () => {
 		const paths = Array.from({ length: 15 }, (_, index) => `src/file${index + 10}.ts`);
-		const bigFolderChildren = indexChildren(buildTree('repo', paths));
+		const bigDirectoryChildren = indexChildren(buildTree('repo', paths));
 
 		test('collapses the extra children into a box', () => {
-			const visible = getVisibleNodes(bigFolderChildren, new Set(['src']), new Map());
+			const visible = getVisibleNodes(bigDirectoryChildren, new Set(['src']), new Map());
 
 			assert.strictEqual(visible.nodeIds.length, 2 + CHILD_LIMIT); // the root, src, and the shown files
 			assert.deepStrictEqual(visible.moreBoxes, [
@@ -111,7 +114,7 @@ suite('getVisibleNodes', () => {
 		});
 
 		test('shows more children once revealed', () => {
-			const visible = getVisibleNodes(bigFolderChildren, new Set(['src']), new Map([['src', 15]]));
+			const visible = getVisibleNodes(bigDirectoryChildren, new Set(['src']), new Map([['src', 15]]));
 
 			assert.strictEqual(visible.nodeIds.length, 2 + 15);
 			assert.deepStrictEqual(visible.moreBoxes, []);
@@ -156,7 +159,7 @@ suite('resolveImport', () => {
 		assert.strictEqual(resolveImport('./lib/b', 'src/app.ts', files), 'src/lib/b.ts');
 	});
 
-	test('finds the index file of a folder', () => {
+	test('finds the index file of a directory', () => {
 		assert.strictEqual(resolveImport('./utils', 'src/app.ts', files), 'src/utils/index.ts');
 	});
 
@@ -443,6 +446,31 @@ function makeInfo(): GraphInfo {
 	return buildGraphInfo({ nodes: nodes, edges: [edge('src/a.ts', 'src/lib/b.ts')] });
 }
 
+suite('boundsOf', () => {
+	test('finds the smallest rectangle around every box', () => {
+		const rects = [{ x: 0, y: 0, width: 100, height: 50 }, { x: 200, y: 100, width: 50, height: 50 }];
+
+		assert.deepStrictEqual(boundsOf(rects), { x: 0, y: 0, width: 250, height: 150 });
+		assert.strictEqual(boundsOf([]), undefined);
+	});
+});
+
+suite('fitCamera', () => {
+	test('centers a small graph without enlarging it', () => {
+		const camera = fitCamera({ x: 0, y: 0, width: 100, height: 100 }, { x: 0, y: 0, width: 1000, height: 800 }, 40);
+
+		// it would fit at 7.2×, but it stays at full size, its center at the viewport's center (500, 400)
+		assert.deepStrictEqual(camera, { x: 450, y: 350, scale: 1 });
+	});
+
+	test('shrinks a big graph until it fits both ways', () => {
+		const camera = fitCamera({ x: 0, y: 0, width: 2000, height: 1000 }, { x: 0, y: 0, width: 1000, height: 800 }, 0);
+
+		// the width is the tighter fit: 1000 / 2000 = 0.5
+		assert.deepStrictEqual(camera, { x: 0, y: 150, scale: 0.5 });
+	});
+});
+
 suite('layout state', () => {
 	test('opening a box gives its children homes', () => {
 		const info = makeInfo();
@@ -514,7 +542,7 @@ suite('layout state', () => {
 
 suite('arrangeChildren', () => {
 	// p holds a 2×2 block of 100×50 boxes: a top-left, b top-right, c bottom-left, d bottom-right.
-	// a is a folder, so it can open.
+	// a is a directory, so it can open.
 	function makeBlock() {
 		const nodes = buildTree('repo', ['p/a/x.ts', 'p/b.ts', 'p/c.ts', 'p/d.ts']);
 		const info = buildGraphInfo({ nodes: nodes, edges: [] });
@@ -613,6 +641,187 @@ suite('placing boxes', () => {
 		const rects = placeBoxes(state, info, { x: 0, y: 0 });
 
 		assert.deepStrictEqual(visibleEdges(state, info, rects), []);
+	});
+});
+
+suite('settleDrop', () => {
+	// 100×50 boxes with homes set by hand; paths decide whether they sit at the top level or in a directory
+	function makeBoxes(homes: [string, { x: number; y: number }][]) {
+		const paths: string[] = [];
+		for (const [id] of homes) {
+			paths.push(id);
+		}
+		const info = buildGraphInfo({ nodes: buildTree('repo', paths), edges: [] });
+		const state = createLayoutState();
+		for (const [id, home] of homes) {
+			state.homes.set(id, home);
+			state.closedSizes.set(id, { width: 100, height: 50 });
+		}
+		return { info: info, state: state };
+	}
+
+	test('pushes a box right when dropped on its left part, and the dropped box stays put', () => {
+		const { info, state } = makeBoxes([['a.ts', { x: 150, y: 0 }], ['b.ts', { x: 200, y: 0 }]]);
+
+		settleDrop(state, info, 'a.ts');
+
+		// a's right edge is at 250, so b goes GAP past it
+		assert.deepStrictEqual(state.homes.get('b.ts'), { x: 250 + GAP, y: 0 });
+		assert.deepStrictEqual(state.homes.get('a.ts'), { x: 150, y: 0 });
+	});
+
+	test('pushes a box down when dropped on its top part', () => {
+		const { info, state } = makeBoxes([['a.ts', { x: 200, y: -30 }], ['b.ts', { x: 200, y: 0 }]]);
+
+		settleDrop(state, info, 'a.ts');
+
+		// a's bottom edge is at 20
+		assert.deepStrictEqual(state.homes.get('b.ts'), { x: 200, y: 20 + GAP });
+	});
+
+	test('pushes left at the top level, where there is no edge', () => {
+		const { info, state } = makeBoxes([['a.ts', { x: 240, y: 20 }], ['b.ts', { x: 200, y: 0 }]]);
+
+		settleDrop(state, info, 'a.ts');
+
+		// a's center is right of b's, so b moves left until its right edge is GAP before a's left edge at 240
+		assert.deepStrictEqual(state.homes.get('b.ts'), { x: 240 - GAP - 100, y: 0 });
+	});
+
+	test('pushes right or down instead when away would pass a directory\'s left edge', () => {
+		const { info, state } = makeBoxes([['d/a.ts', { x: 40, y: 0 }], ['d/b.ts', { x: 0, y: 0 }]]);
+
+		settleDrop(state, info, 'd/a.ts');
+
+		// left would put b below 0; right would be 180 away, down only 90, so it goes down
+		assert.deepStrictEqual(state.homes.get('d/b.ts'), { x: 0, y: 50 + GAP });
+	});
+
+	test('pushes along a chain: what gets pushed pushes what it hits', () => {
+		const { info, state } = makeBoxes([
+			['a.ts', { x: 150, y: 0 }],
+			['b.ts', { x: 200, y: 0 }],
+			['c.ts', { x: 340, y: 0 }],
+		]);
+
+		settleDrop(state, info, 'a.ts');
+
+		// b goes to 290, which runs into c, so c goes GAP past b's new right edge at 390
+		assert.deepStrictEqual(state.homes.get('b.ts'), { x: 290, y: 0 });
+		assert.deepStrictEqual(state.homes.get('c.ts'), { x: 390 + GAP, y: 0 });
+	});
+});
+
+suite('moveTo', () => {
+	test('moves a box, but never past its parent\'s left or top edge', () => {
+		const info = makeInfo();
+		const state = createLayoutState();
+
+		moveTo(state, info, 'src/a.ts', { x: 300, y: 200 });
+		assert.deepStrictEqual(state.homes.get('src/a.ts'), { x: 300, y: 200 });
+
+		moveTo(state, info, 'src/a.ts', { x: -50, y: -10 });
+		assert.deepStrictEqual(state.homes.get('src/a.ts'), { x: 0, y: 0 });
+	});
+
+	test('lets a box at the top level go anywhere, since the page has no edges', () => {
+		const info = makeInfo();
+		const state = createLayoutState();
+
+		moveTo(state, info, 'src', { x: -50, y: -10 });
+
+		assert.deepStrictEqual(state.homes.get('src'), { x: -50, y: -10 });
+	});
+});
+
+suite('resetNode', () => {
+	// the root and src open, the way a fresh view would have them
+	function openSrc() {
+		const info = makeInfo();
+		const state = createLayoutState();
+		openNode(state, info, ROOT_ID);
+		openNode(state, info, 'src');
+		return { info: info, state: state };
+	}
+
+	test('puts moved boxes back where the default layout had them', () => {
+		const { info, state } = openSrc();
+		const defaultHome = state.homes.get('src/a.ts');
+		state.homes.set('src/a.ts', { x: 500, y: 500 });
+
+		resetNode(state, info, 'src');
+
+		assert.deepStrictEqual(state.homes.get('src/a.ts'), defaultHome);
+	});
+
+	test('forgets sizes the user gave the box and everything inside it', () => {
+		const { info, state } = openSrc();
+		state.openSizes.set('src', { width: 999, height: 999 });
+		state.closedSizes.set('src/lib', { width: 300, height: 90 });
+
+		resetNode(state, info, 'src');
+
+		assert.ok(!state.openSizes.has('src'));
+		assert.ok(!state.closedSizes.has('src/lib'));
+	});
+
+	test('closes the boxes inside it, but not itself', () => {
+		const { info, state } = openSrc();
+		openNode(state, info, 'src/lib');
+
+		resetNode(state, info, 'src');
+
+		assert.ok(state.expanded.has('src'));
+		assert.ok(!state.expanded.has('src/lib'));
+	});
+
+	test('closes everything when the whole graph is reset', () => {
+		const { info, state } = openSrc();
+		openNode(state, info, 'src/lib');
+
+		resetNode(state, info, ROOT_ID);
+
+		assert.deepStrictEqual(Array.from(state.expanded), [ROOT_ID]);
+	});
+
+	test('leaves the box itself where it is', () => {
+		const { info, state } = openSrc();
+		state.homes.set('src', { x: 300, y: 300 });
+
+		resetNode(state, info, 'src');
+
+		assert.deepStrictEqual(state.homes.get('src'), { x: 300, y: 300 });
+	});
+});
+
+suite('saving the layout', () => {
+	test('survives being saved and restored', () => {
+		const info = makeInfo();
+		const state = createLayoutState();
+		openNode(state, info, ROOT_ID);
+		openNode(state, info, 'src');
+		state.homes.set('src/a.ts', { x: 500, y: 500 });
+		state.closedSizes.set('src/lib', { width: 300, height: 90 });
+		const camera = { x: 10, y: 20, scale: 1.5 };
+
+		// through JSON text, the way a message or VS Code's storage carries it
+		const text = JSON.stringify(toSaved(state, camera));
+		const restored = fromSaved(JSON.parse(text), info);
+
+		assert.deepStrictEqual(restored.state, state);
+		assert.deepStrictEqual(restored.camera, camera);
+	});
+
+	test('drops anything about nodes that no longer exist', () => {
+		const info = makeInfo();
+		const saved = toSaved(createLayoutState(), { x: 0, y: 0, scale: 1 });
+		saved.expanded.push('deleted');
+		saved.homes.push(['deleted/file.ts', { x: 1, y: 1 }]);
+
+		const restored = fromSaved(saved, info);
+
+		assert.ok(!restored.state.expanded.has('deleted'));
+		assert.ok(!restored.state.homes.has('deleted/file.ts'));
 	});
 });
 
