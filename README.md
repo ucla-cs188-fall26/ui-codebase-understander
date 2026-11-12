@@ -22,6 +22,16 @@ launching a second VS Code window called the **Extension Development Host**.
 The extension currently displays a “Hello World from codeflow-visualizer!”
 notification. There is no `localhost` URL to open.
 
+## Running the demo
+- clone this project locally in visual studio code
+- ensure that dependencies are installed ```npm install```
+- click on **run and debug** button on the side
+- a new window should pop up
+- within the new window open a new folder of project that you want to inspect / explore
+- cmd + P (access command palette) -> search for : code graph
+- click on the code graph and a tab should open up within visual studio code with an interactive graph
+
+
 ## Development workflow
 
 - Keep the Extension Development Host window open while testing.
