@@ -20,6 +20,7 @@ export interface GraphInfo {
 // everything about the view that can differ from the default; deleting an entry brings the default back
 export interface LayoutState {
 	expanded: Set<string>; // open nodes; the root is always open
+	revealed: Set<string>; // parents whose +N strip was clicked to show every child
 	homes: Map<string, Position>; // each placed box's top-left, relative to the inside of its parent
 	closedSizes: Map<string, Size>; // only boxes the user has resized while closed
 	openSizes: Map<string, Size>; // only boxes the user has resized while open; others fit their children
@@ -98,6 +99,7 @@ export function childOrigin(): Position {
 export function createLayoutState(): LayoutState {
 	return {
 		expanded: new Set([ROOT_ID]),
+		revealed: new Set(),
 		homes: new Map(),
 		closedSizes: new Map(),
 		openSizes: new Map(),
@@ -111,7 +113,10 @@ export function createLayoutState(): LayoutState {
  * @returns Up to CHILD_LIMIT children, most important first; at the top level, everything part of the flow plus up to
  *   CHILD_LIMIT of the rest (chosen once per graph, in buildGraphInfo).
  */
-export function shownChildren(info: GraphInfo, parentId: string): string[] {
+export function shownChildren(info: GraphInfo, parentId: string, state?: LayoutState): string[] {
+	if (state?.revealed.has(parentId)) {
+		return info.childrenById.get(parentId) ?? [];
+	}
 	if (parentId === ROOT_ID) {
 		return info.topLevelShown;
 	}
@@ -125,8 +130,8 @@ export function shownChildren(info: GraphInfo, parentId: string): string[] {
  * @param parentId The node whose children we want.
  * @returns Its other children, most important first.
  */
-function childrenPastLimit(info: GraphInfo, parentId: string): string[] {
-	const shown = new Set(shownChildren(info, parentId));
+function childrenPastLimit(info: GraphInfo, parentId: string, state?: LayoutState): string[] {
+	const shown = new Set(shownChildren(info, parentId, state));
 	const past: string[] = [];
 	for (const id of info.childrenById.get(parentId) ?? []) {
 		if (!shown.has(id)) {
@@ -148,7 +153,10 @@ const pastLimitSidesCache = new WeakMap<GraphInfo, Map<string, { right: string[]
  * @param parentId The node.
  * @returns The hidden children on each side, most important first.
  */
-export function pastLimitSides(info: GraphInfo, parentId: string): { right: string[]; bottom: string[] } {
+export function pastLimitSides(info: GraphInfo, parentId: string, state?: LayoutState): { right: string[]; bottom: string[] } {
+	if (state?.revealed.has(parentId)) {
+		return { right: [], bottom: [] };
+	}
 	let byParent = pastLimitSidesCache.get(info);
 	if (byParent === undefined) {
 		byParent = new Map();
@@ -159,7 +167,7 @@ export function pastLimitSides(info: GraphInfo, parentId: string): { right: stri
 		return known;
 	}
 
-	const past = childrenPastLimit(info, parentId);
+	const past = childrenPastLimit(info, parentId, state);
 	const sides = { right: [] as string[], bottom: [] as string[] };
 	if (parentId === ROOT_ID) {
 		sides.bottom = past;
@@ -174,7 +182,7 @@ export function pastLimitSides(info: GraphInfo, parentId: string): { right: stri
 
 		// the right edge of the shown children; anything starting past it would have been to their right
 		let shownRight = 0;
-		for (const id of shownChildren(info, parentId)) {
+		for (const id of shownChildren(info, parentId, state)) {
 			shownRight = Math.max(shownRight, positions.get(id)!.x + sizes.get(id)!.width);
 		}
 		for (const id of past) {
@@ -222,7 +230,7 @@ export function closedSize(state: LayoutState, info: GraphInfo, id: string): Siz
  */
 export function arrangeChildren(state: LayoutState, info: GraphInfo, parentId: string): Map<string, Rect> {
 	const childIds: string[] = [];
-	for (const id of shownChildren(info, parentId)) {
+	for (const id of shownChildren(info, parentId, state)) {
 		if (state.homes.has(id)) {
 			childIds.push(id);
 		}
@@ -369,7 +377,7 @@ export function arrangeShown(state: LayoutState, info: GraphInfo, parentId: stri
 	const rects = arrangeChildren(state, info, parentId);
 
 	// children past the limit never got a home; they wait on the side the default layout would have put them
-	const past = pastLimitSides(info, parentId);
+	const past = pastLimitSides(info, parentId, state);
 
 	// only a size the user chose can be too small; otherwise the box fits its children
 	const set = state.openSizes.get(parentId);
@@ -407,11 +415,11 @@ export function arrangeShown(state: LayoutState, info: GraphInfo, parentId: stri
  * @returns STRIP_ROOM on each side that has some, otherwise nothing. The top level keeps its own strip below the boxes
  *   instead, outside any box.
  */
-function pastLimitRoom(info: GraphInfo, id: string): { right: number; bottom: number } {
+function pastLimitRoom(state: LayoutState, info: GraphInfo, id: string): { right: number; bottom: number } {
 	if (id === ROOT_ID) {
 		return { right: 0, bottom: 0 };
 	}
-	const past = pastLimitSides(info, id);
+	const past = pastLimitSides(info, id, state);
 	return { right: past.right.length > 0 ? STRIP_ROOM : 0, bottom: past.bottom.length > 0 ? STRIP_ROOM : 0 };
 }
 
@@ -434,7 +442,7 @@ export function fitSize(state: LayoutState, info: GraphInfo, id: string): Size {
 
 	// plus room for strips of children past the limit, so their padding is even too
 	const origin = childOrigin();
-	const room = pastLimitRoom(info, id);
+	const room = pastLimitRoom(state, info, id);
 	return { width: origin.x + right + PADDING + room.right, height: origin.y + bottom + PADDING + room.bottom };
 }
 
@@ -463,7 +471,7 @@ export function layOutChildren(state: LayoutState, info: GraphInfo, parentId: st
 	// out, like new files, or top-level files that used to be hidden
 	const placed: string[] = [];
 	const unplaced: string[] = [];
-	for (const id of shownChildren(info, parentId)) {
+	for (const id of shownChildren(info, parentId, state)) {
 		if (state.homes.has(id)) {
 			placed.push(id);
 		} else {
@@ -580,7 +588,7 @@ export function growToFit(state: LayoutState, info: GraphInfo, id: string): void
 		const rect = arrangeChildren(state, info, ancestorId).get(child);
 		if (set !== undefined && rect !== undefined) {
 			// what this one box needs: up to its far edges, plus the padding (and the title, going down)
-			const room = pastLimitRoom(info, ancestorId);
+			const room = pastLimitRoom(state, info, ancestorId);
 			state.openSizes.set(ancestorId, {
 				width: Math.max(set.width, origin.x + rect.x + rect.width + PADDING + room.right),
 				height: Math.max(set.height, origin.y + rect.y + rect.height + PADDING + room.bottom),
@@ -630,7 +638,7 @@ function setSize(state: LayoutState, info: GraphInfo, id: string, size: Size): v
 		// at the smallest size, a row or column longer than 3 hides boxes, which brings a strip that needs its room
 		const hidesAcross = squishHorizontally(children, smallestWidth).hidden.length > 0;
 		const hidesDown = squishVertically(children, smallestHeight).hidden.length > 0;
-		const room = pastLimitRoom(info, id);
+		const room = pastLimitRoom(state, info, id);
 		const rightRoom = room.right > 0 || hidesAcross ? STRIP_ROOM : 0;
 		const bottomRoom = room.bottom > 0 || hidesDown ? STRIP_ROOM : 0;
 

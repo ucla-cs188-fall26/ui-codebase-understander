@@ -1,10 +1,12 @@
 import { Camera } from './camera';
+import { ROOT_ID } from '../graph/types';
 import { Position, Size } from './geometry';
 import { createLayoutState, GraphInfo, LayoutState } from './state';
 
 // the layout state and camera in plain arrays, since messages and VS Code's storage only carry JSON-like data
 export interface SavedLayout {
 	expanded: string[];
+	revealed?: string[];
 	homes: [string, Position][];
 	closedSizes: [string, Size][];
 	openSizes: [string, Size][];
@@ -20,6 +22,7 @@ export interface SavedLayout {
 export function toSaved(state: LayoutState, camera: Camera): SavedLayout {
 	return {
 		expanded: Array.from(state.expanded),
+		revealed: Array.from(state.revealed),
 		homes: Array.from(state.homes.entries()),
 		closedSizes: Array.from(state.closedSizes.entries()),
 		openSizes: Array.from(state.openSizes.entries()),
@@ -41,6 +44,11 @@ export function fromSaved(saved: SavedLayout, info: GraphInfo): { state: LayoutS
 	for (const id of saved.expanded) {
 		if (info.nodesById.has(id)) {
 			state.expanded.add(id);
+		}
+	}
+	for (const id of saved.revealed ?? []) {
+		if (info.nodesById.has(id) || id === ROOT_ID) {
+			state.revealed.add(id);
 		}
 	}
 	for (const [id, home] of saved.homes) {

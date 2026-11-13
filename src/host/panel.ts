@@ -268,6 +268,7 @@ function buildHtml(scriptUri: vscode.Uri): string {
 		/* a "+N" bar in a box's padding, standing in for the children hidden on that side */
 		.strip {
 			position: absolute;
+			cursor: pointer;
 			box-sizing: border-box;
 			display: flex;
 			align-items: center;
@@ -278,6 +279,10 @@ function buildHtml(scriptUri: vscode.Uri): string {
 			color: var(--vscode-descriptionForeground);
 			font-size: 11px;
 			white-space: nowrap;
+		}
+		.strip:hover {
+			color: var(--vscode-editor-foreground);
+			background: var(--vscode-toolbar-hoverBackground);
 		}
 		/* a right strip is tall and thin, so its count reads top to bottom */
 		.strip-right {

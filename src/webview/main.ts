@@ -131,6 +131,7 @@ function endsUnderDraggedBox(arrow: Arrow, rects: Map<string, Rect>): boolean {
 function makeStrip(strip: Strip, zIndex: number): HTMLElement {
 	const element = document.createElement('div');
 	element.className = 'strip strip-' + strip.side;
+	element.dataset.ownerId = strip.ownerId;
 	element.style.left = strip.rect.x + 'px';
 	element.style.top = strip.rect.y + 'px';
 	element.style.width = strip.rect.width + 'px';
@@ -936,6 +937,14 @@ function handleClick(event: MouseEvent): void {
 	}
 
 	const target = event.target as Element;
+	const strip = target.closest<HTMLElement>('.strip');
+	if (strip !== null && info !== undefined) {
+		const ownerId = strip.dataset.ownerId!;
+		state.revealed.add(ownerId);
+		layOutChildren(state, info, ownerId);
+		drawGraph();
+		return;
+	}
 	const box = target.closest<HTMLElement>('.box');
 	const id = box?.dataset.id;
 
