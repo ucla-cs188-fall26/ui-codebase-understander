@@ -1,4 +1,4 @@
-import { NodeKind, ROOT_ID } from '../graph/types';
+import { Edge, NodeKind, ROOT_ID } from '../graph/types';
 import { ExtensionToWebview, WebviewToExtension } from '../messages';
 import { connections, isInside } from '../analysis/edges';
 import { getLineage, groupByParent } from '../analysis/lookups';
@@ -9,7 +9,7 @@ import { arrangeShown, boxSize, buildGraphInfo, closeNode, createLayoutState, Gr
 import { fromSaved, toSaved } from '../layout/saved';
 import { dropAt } from '../layout/drop';
 import { makeCloseIcon, makeFitIcon, makeGripIcon, makeOpenIcon, makeResetIcon, makeResizeIcon, SVG_NS } from './icons';
-import { arrowZIndex, boxZIndexes, nodeOfEnd, placeBoxes, placeStrips, Strip, visibleEdges } from '../layout/place';
+import { boxZIndexes, nodeOfEnd, placeBoxes, placeStrips, Strip, visibleEdges, visibleEndpointOf } from '../layout/place';
 
 // VS Code provides this once per webview; calling it a second time throws
 declare function acquireVsCodeApi(): { postMessage(message: WebviewToExtension): void };
@@ -82,17 +82,38 @@ function makeArrowheadDefs(): SVGSVGElement {
 /**
  * Makes one arrow, in its own svg so it can paint at its own depth among the boxes.
  * @param arrow The arrow, from placeArrows, in page coordinates.
- * @param zIndex How high it paints, from arrowZIndex.
+ * @param zIndex How high it paints above the graph boxes.
  * @returns The svg element holding the arrow.
  */
-function makeArrow(arrow: Arrow, zIndex: number): SVGSVGElement {
+function makeArrow(arrow: Arrow, edge: Edge, zIndex: number): SVGSVGElement {
 	const svg = document.createElementNS(SVG_NS, 'svg');
 	svg.classList.add('arrow');
+	if (selectedEdge !== undefined && selectedEdge.from === edge.from && selectedEdge.to === edge.to) {
+		svg.classList.add('selected');
+	}
 	svg.style.zIndex = String(zIndex);
+	// The SVG needs a viewport around the whole curve; otherwise only the portion in its default 300x150 box
+	// receives pointer events, even though overflow lets the rest of the curve remain visible.
+	const pull = Math.max(30, Math.hypot(arrow.end.x - arrow.start.x, arrow.end.y - arrow.start.y) / 2) + 4;
+	const left = Math.min(arrow.start.x, arrow.end.x) - pull;
+	const top = Math.min(arrow.start.y, arrow.end.y) - pull;
+	const width = Math.abs(arrow.end.x - arrow.start.x) + pull * 2;
+	const height = Math.abs(arrow.end.y - arrow.start.y) + pull * 2;
+	svg.setAttribute('viewBox', left + ' ' + top + ' ' + width + ' ' + height);
+	svg.setAttribute('width', String(width));
+	svg.setAttribute('height', String(height));
+	svg.style.left = left + 'px';
+	svg.style.top = top + 'px';
 
 	const path = document.createElementNS(SVG_NS, 'path');
 	path.setAttribute('d', arrowPath(arrow));
 	path.setAttribute('marker-end', 'url(#arrowhead)');
+	path.addEventListener('click', (event) => {
+		event.stopPropagation();
+		selectedEdge = edge;
+		selectedId = undefined;
+		drawGraph();
+	});
 	svg.appendChild(path);
 
 	return svg;
@@ -195,6 +216,7 @@ function drawGraph(): void {
 
 	const edges = visibleEdges(state, info, rects, strips);
 	const arrows = placeArrows(edges, arrowRects);
+	const topGraphZ = Math.max(0, ...boxZ.values()) + 1;
 	for (let i = 0; i < arrows.length; i++) {
 		// while dragging, an arrow ending under the dragged box would point at something hidden
 		if (endsUnderDraggedBox(arrows[i], rects)) {
@@ -202,7 +224,7 @@ function drawGraph(): void {
 		}
 
 		// placeArrows keeps the edges' order, so arrows[i] belongs to edges[i]
-		world.appendChild(makeArrow(arrows[i], arrowZIndex(edges[i], state, info, boxZ)));
+		world.appendChild(makeArrow(arrows[i], edges[i], topGraphZ));
 	}
 
 	for (const [id, rect] of rects) {
@@ -257,6 +279,7 @@ let state: LayoutState = createLayoutState();
 
 // the node whose details the sidebar shows, or undefined when nothing is selected
 let selectedId: string | undefined = undefined;
+let selectedEdge: Edge | undefined = undefined;
 
 // every box drawn last time, so Fit to view can measure what's on screen
 let lastRects = new Map<string, Rect>();
@@ -266,12 +289,16 @@ let lastRects = new Map<string, Rect>();
  */
 function drawSidebar(): void {
 	const sidebar = document.getElementById('sidebar')!;
-	if (info === undefined || selectedId === undefined) {
+	if (info === undefined || (selectedId === undefined && selectedEdge === undefined)) {
 		sidebar.classList.remove('visible');
 		return;
 	}
+	if (selectedEdge !== undefined) {
+		drawEdgeSidebar(sidebar, selectedEdge);
+		return;
+	}
 
-	const node = info.nodesById.get(selectedId)!;
+	const node = info.nodesById.get(selectedId!)!;
 	sidebar.replaceChildren();
 
 	const header = document.createElement('div');
@@ -320,12 +347,47 @@ function drawSidebar(): void {
 	if (node.kind !== 'file') {
 		addDetail(sidebar, 'Children', String(node.childCount));
 	}
-	addDetail(sidebar, 'Times imported', String(info.indegrees.get(selectedId)));
+	addDetail(sidebar, 'Times imported', String(info.indegrees.get(selectedId!)));
 
-	const linked = connections(selectedId, info.edges, info.nodesById);
+	const linked = connections(selectedId!, info.edges, info.nodesById);
 	addConnectionList(sidebar, 'Imports', linked.outgoing);
 	addConnectionList(sidebar, 'Imported by', linked.incoming);
 
+	sidebar.classList.add('visible');
+}
+
+/** Shows the concrete graph edges represented by the selected visible arrow. */
+function drawEdgeSidebar(sidebar: HTMLElement, selected: Edge): void {
+	sidebar.replaceChildren();
+	const header = document.createElement('div');
+	header.className = 'sidebar-header';
+	const title = document.createElement('span');
+	title.textContent = 'Relationship';
+	header.appendChild(title);
+	const close = document.createElement('button');
+	close.className = 'icon-button sidebar-close';
+	close.title = 'Close';
+	close.appendChild(makeCloseIcon());
+	close.addEventListener('click', handleSidebarClose);
+	header.appendChild(close);
+	sidebar.appendChild(header);
+
+	const rects = placeBoxes(state, info!, { x: START_X, y: START_Y });
+	const strips = placeStrips(state, info!, rects);
+	const represented = info!.edges.filter((edge) =>
+		visibleEndpointOf(edge.from, state, info!, rects, strips) === selected.from
+		&& visibleEndpointOf(edge.to, state, info!, rects, strips) === selected.to,
+	);
+	for (const edge of represented) {
+		const from = info!.nodesById.get(edge.from)!;
+		const to = info!.nodesById.get(edge.to)!;
+		addDetail(sidebar, 'Relationship', from.name + ' ' + edge.kind + 's ' + to.name);
+		addDetail(sidebar, 'From', from.path);
+		addDetail(sidebar, 'To', to.path);
+	}
+	if (represented.length === 0) {
+		addDetail(sidebar, 'Relationship', nodeOfEnd(selected.from) + ' connects to ' + nodeOfEnd(selected.to));
+	}
 	sidebar.classList.add('visible');
 }
 
@@ -603,6 +665,7 @@ function revealNode(id: string): void {
  */
 function handleSidebarClose(): void {
 	selectedId = undefined;
+	selectedEdge = undefined;
 	drawGraph();
 }
 
@@ -939,6 +1002,7 @@ function handleClick(event: MouseEvent): void {
 	const target = event.target as Element;
 	const strip = target.closest<HTMLElement>('.strip');
 	if (strip !== null && info !== undefined) {
+		selectedEdge = undefined;
 		const ownerId = strip.dataset.ownerId!;
 		state.revealed.add(ownerId);
 		layOutChildren(state, info, ownerId);
@@ -951,6 +1015,7 @@ function handleClick(event: MouseEvent): void {
 	// empty space, or the "+N more" box, which has no node
 	if (id === undefined) {
 		selectedId = undefined;
+		selectedEdge = undefined;
 	} else if (target.closest('.chevron') !== null) {
 		if (state.expanded.has(id)) {
 			closeNode(state, info, id);
@@ -960,6 +1025,7 @@ function handleClick(event: MouseEvent): void {
 		}
 	} else {
 		selectedId = id;
+		selectedEdge = undefined;
 	}
 
 	drawGraph();

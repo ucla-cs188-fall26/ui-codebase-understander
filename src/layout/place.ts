@@ -126,7 +126,7 @@ function stripHiding(id: string, ownerId: string, info: GraphInfo, strips: Strip
  * @param strips Every strip.
  * @returns A box's or strip's id, or undefined if the end can't be shown at all.
  */
-function endpointOf(id: string, state: LayoutState, info: GraphInfo, rects: Map<string, Rect>, strips: Strip[]): string | undefined {
+export function visibleEndpointOf(id: string, state: LayoutState, info: GraphInfo, rects: Map<string, Rect>, strips: Strip[]): string | undefined {
 	const box = visibleBoxContaining(id, info, rects);
 
 	// not even its top-level box is shown, so it's behind the root's strip, if any
@@ -154,8 +154,8 @@ export function visibleEdges(state: LayoutState, info: GraphInfo, rects: Map<str
 	const edges: Edge[] = [];
 
 	for (const edge of info.edges) {
-		const from = endpointOf(edge.from, state, info, rects, strips);
-		const to = endpointOf(edge.to, state, info, rects, strips);
+		const from = visibleEndpointOf(edge.from, state, info, rects, strips);
+		const to = visibleEndpointOf(edge.to, state, info, rects, strips);
 		if (from === undefined || to === undefined) {
 			continue;
 		}

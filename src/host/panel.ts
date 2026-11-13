@@ -179,7 +179,14 @@ function buildHtml(scriptUri: vscode.Uri): string {
 		.arrow path {
 			fill: none;
 			stroke: var(--vscode-editorLineNumber-foreground);
-			stroke-width: 1.5;
+			stroke-width: 2.5;
+			pointer-events: stroke;
+			cursor: pointer;
+		}
+		.arrow.selected path {
+			stroke: var(--vscode-focusBorder, var(--vscode-textLink-foreground));
+			stroke-width: 3;
+			filter: drop-shadow(0 0 4px var(--vscode-focusBorder, var(--vscode-textLink-foreground)));
 		}
 		#arrowheads {
 			position: absolute;
