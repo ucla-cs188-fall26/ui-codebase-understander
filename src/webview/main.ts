@@ -1,5 +1,5 @@
 import { Edge, NodeKind, ROOT_ID } from '../graph/types';
-import { ExtensionToWebview, ModelOption, WebviewToExtension } from '../messages';
+import { ExtensionToWebview, FlowScenario, ModelOption, WebviewToExtension } from '../messages';
 import { connections, isInside } from '../analysis/edges';
 import { getLineage, groupByParent } from '../analysis/lookups';
 import { Arrow, arrowPath, placeArrows } from '../layout/arrows';
@@ -670,7 +670,7 @@ function handleSidebarClose(): void {
 }
 
 /**
- * Checks whether an event happened on the sidebar or toolbar, which float over the graph and handle their own
+ * Checks whether an event happened on a floating panel, which handles its own
  * clicks and scrolling.
  * @param event Any browser event.
  * @returns True if its target is in either.
@@ -679,7 +679,9 @@ function isOnOverlay(event: Event): boolean {
 	// the path is recorded when the event starts, so it still holds the sidebar
 	// even if a redraw has since removed the element that was clicked
 	const path = event.composedPath();
-	return path.includes(document.getElementById('sidebar')!) || path.includes(document.getElementById('toolbar')!);
+	return path.includes(document.getElementById('sidebar')!)
+		|| path.includes(document.getElementById('toolbar')!)
+		|| path.includes(document.getElementById('flow-results')!);
 }
 
 /**
@@ -699,6 +701,8 @@ function drawToolbar(): void {
 	modelSelect.appendChild(placeholder);
 	modelSelect.addEventListener('change', () => {
 		const model = availableModels.find((item) => modelKey(item) === modelSelect.value);
+		modelIsAvailable = model !== undefined;
+		(document.getElementById('generate-flows') as HTMLButtonElement).disabled = !modelIsAvailable;
 		vscode.postMessage({ type: 'selectModel', model: model });
 	});
 	toolbar.appendChild(modelSelect);
@@ -721,6 +725,21 @@ function drawToolbar(): void {
 	modelStatus.setAttribute('role', 'status');
 	toolbar.appendChild(modelStatus);
 
+	const generate = document.createElement('button');
+	generate.className = 'text-button';
+	generate.id = 'generate-flows';
+	generate.textContent = 'Generate flows';
+	generate.title = 'Ask the selected language model to find example repository flows';
+	generate.disabled = true;
+	generate.addEventListener('click', () => {
+		const selected = availableModels.find((item) => modelKey(item) === modelSelect.value);
+		generate.disabled = true;
+		generate.textContent = 'Generating…';
+		showFlowResults([], 'Analyzing repository with the selected model…', true);
+		vscode.postMessage({ type: 'generateFlows', model: selected });
+	});
+	toolbar.appendChild(generate);
+
 	const reset = document.createElement('button');
 	reset.className = 'icon-button';
 	reset.title = 'Reset layout';
@@ -737,6 +756,7 @@ function drawToolbar(): void {
 }
 
 let availableModels: ModelOption[] = [];
+let modelIsAvailable = false;
 
 function modelKey(model: ModelOption): string {
 	return model.vendor + '\u0000' + model.id;
@@ -768,9 +788,67 @@ function showModels(models: ModelOption[], selected: ModelOption | undefined, st
 	}
 	select.value = selected ? modelKey(selected) : '';
 	select.disabled = models.length === 0;
+	modelIsAvailable = selected !== undefined && models.some((model) => modelKey(model) === modelKey(selected));
+	(document.getElementById('generate-flows') as HTMLButtonElement).disabled = !modelIsAvailable;
 }
 
 let modelStatus: HTMLElement;
+
+function showFlowResults(flows: FlowScenario[], status?: string, loading = false): void {
+	const panel = document.getElementById('flow-results')!;
+	panel.replaceChildren();
+	const header = document.createElement('div');
+	header.className = 'flow-results-header';
+	const title = document.createElement('strong');
+	title.textContent = 'Example flows';
+	header.appendChild(title);
+	const close = document.createElement('button');
+	close.className = 'icon-button';
+	close.textContent = '×';
+	close.title = 'Close flow results';
+	close.setAttribute('aria-label', close.title);
+	close.addEventListener('click', () => panel.classList.remove('visible'));
+	header.appendChild(close);
+	panel.appendChild(header);
+	if (status) {
+		const message = document.createElement('div');
+		message.className = 'flow-status';
+		message.textContent = status;
+		panel.appendChild(message);
+	}
+	for (const flow of flows) {
+		const card = document.createElement('section');
+		card.className = 'flow-card';
+		const heading = document.createElement('strong');
+		heading.textContent = flow.title;
+		card.appendChild(heading);
+		const summary = document.createElement('p');
+		summary.textContent = flow.summary;
+		card.appendChild(summary);
+		const steps = document.createElement('ol');
+		for (const step of flow.steps) {
+			const row = document.createElement('li');
+			const action = document.createElement('span');
+			action.textContent = step.action + ' ';
+			row.appendChild(action);
+			const open = document.createElement('button');
+			open.className = 'flow-path-button';
+			open.textContent = step.nodeId;
+			open.title = 'Open ' + step.nodeId;
+			open.addEventListener('click', () => vscode.postMessage({ type: 'open', path: step.nodeId, kind: 'file' }));
+			row.appendChild(open);
+			steps.appendChild(row);
+		}
+		card.appendChild(steps);
+		panel.appendChild(card);
+	}
+	panel.classList.add('visible');
+	const generate = document.getElementById('generate-flows') as HTMLButtonElement;
+	if (!loading) {
+		generate.disabled = !modelIsAvailable;
+		generate.textContent = 'Generate flows';
+	}
+}
 
 /**
  * Asks the extension to reset the whole layout; it confirms first, since only it can show VS Code's dialogs.
@@ -1105,6 +1183,10 @@ function handleClick(event: MouseEvent): void {
  * @param event The browser's message event. Its data is what the extension posted.
  */
 function handleMessage(event: MessageEvent<ExtensionToWebview>): void {
+	if (event.data.type === 'flowResults') {
+		showFlowResults(event.data.flows, event.data.status);
+		return;
+	}
 	if (event.data.type === 'models') {
 		showModels(event.data.models, event.data.selected, event.data.status);
 		return;

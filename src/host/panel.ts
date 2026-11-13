@@ -1,12 +1,15 @@
 import * as vscode from 'vscode';
 import { randomBytes } from 'crypto';
 import { loadGraph } from './loadGraph';
-import { ExtensionToWebview, ModelOption, WebviewToExtension } from '../messages';
+import { ExtensionToWebview, FlowScenario, ModelOption, WebviewToExtension } from '../messages';
 import { SavedLayout } from '../layout/saved';
+import { Graph } from '../graph/types';
+import { CODE_EXTENSIONS } from '../graph/imports';
 
 // where this workspace's layout is kept in VS Code's per-workspace storage
 const LAYOUT_KEY = 'codeflow.layout';
 const MODEL_KEY = 'codeflow.languageModel';
+const BLOCKED_MODELS_KEY = 'codeflow.blockedLanguageModels';
 
 // the graph panel that's open, so commands like Reset Layout can reach it; undefined when it's closed
 let currentPanel: vscode.WebviewPanel | undefined = undefined;
@@ -46,6 +49,7 @@ export async function openGraphPanel(context: vscode.ExtensionContext): Promise<
 
 	// saved here, past the check above, so functions inside can use it without re-checking for undefined
 	const workspaceUri = workspaceFolder.uri;
+	const activeWorkspaceFolder = workspaceFolder;
 
 	const distDirectory = vscode.Uri.joinPath(context.extensionUri, 'dist');
 	const panel = vscode.window.createWebviewPanel(
@@ -83,12 +87,15 @@ export async function openGraphPanel(context: vscode.ExtensionContext): Promise<
 			try {
 				// This is deliberately initiated by the user's click: VS Code may ask for consent here.
 				const models = await vscode.lm.selectChatModels();
-				const options: ModelOption[] = models.map((model) => ({
+				const blocked = new Set(context.globalState.get<string[]>(BLOCKED_MODELS_KEY, []));
+				const options: ModelOption[] = models
+					.filter((model) => !blocked.has(modelKey(model)) && context.languageModelAccessInformation.canSendRequest(model) !== false)
+					.map((model) => ({
 					id: model.id,
 					vendor: model.vendor,
 					name: model.name,
 					family: model.family,
-				}));
+					}));
 				const selected = context.workspaceState.get<ModelOption>(MODEL_KEY);
 				panel.webview.postMessage({
 					type: 'models',
@@ -109,6 +116,61 @@ export async function openGraphPanel(context: vscode.ExtensionContext): Promise<
 
 		if (message.type === 'selectModel') {
 			await context.workspaceState.update(MODEL_KEY, message.model);
+		}
+
+		if (message.type === 'generateFlows') {
+			const selected = message.model;
+			let currentModels: vscode.LanguageModelChat[] = [];
+			try {
+				if (selected === undefined) {
+					panel.webview.postMessage({ type: 'flowResults', flows: [], status: 'Choose a language model first.' });
+					return;
+				}
+				currentModels = await vscode.lm.selectChatModels({ id: selected.id, vendor: selected.vendor });
+				const model = currentModels.find((candidate) => candidate.id === selected.id && candidate.vendor === selected.vendor);
+				if (model === undefined) {
+					panel.webview.postMessage({ type: 'flowResults', flows: [], status: 'The selected model is no longer available. Find models and choose another.' });
+					return;
+				}
+				await context.workspaceState.update(MODEL_KEY, selected);
+
+				const graph = await graphPromise;
+				const prompt = await buildFlowPrompt(activeWorkspaceFolder, graph, model);
+				const response = await model.sendRequest(
+					[vscode.LanguageModelChatMessage.User(prompt)],
+					{},
+				);
+				let responseText = '';
+				for await (const part of response.stream) {
+					if (part instanceof vscode.LanguageModelTextPart) {
+						responseText += part.value;
+					}
+				}
+				const flows = parseFlowScenarios(responseText, graph);
+				panel.webview.postMessage({
+					type: 'flowResults',
+					flows: flows,
+					status: flows.length === 0 ? 'The model returned no valid flows. Try generating again.' : 'Generated ' + flows.length + ' example flow' + (flows.length === 1 ? '.' : 's.'),
+				});
+			} catch (error) {
+				if (selected !== undefined && String(error).toLowerCase().includes('only available to vs code core')) {
+					const blocked = new Set(context.globalState.get<string[]>(BLOCKED_MODELS_KEY, []));
+					blocked.add(modelKey(selected));
+					await context.globalState.update(BLOCKED_MODELS_KEY, Array.from(blocked));
+					await context.workspaceState.update(MODEL_KEY, undefined);
+					const available = currentModels
+						.filter((candidate) => !blocked.has(modelKey(candidate)) && context.languageModelAccessInformation.canSendRequest(candidate) !== false)
+						.map((candidate) => ({ id: candidate.id, vendor: candidate.vendor, name: candidate.name, family: candidate.family }));
+					panel.webview.postMessage({
+						type: 'models',
+						models: available,
+						selected: undefined,
+						status: selected.name + ' is only available to VS Code itself. Choose another model.',
+					});
+					return;
+				}
+				panel.webview.postMessage({ type: 'flowResults', flows: [], status: 'Flow generation failed: ' + String(error) });
+			}
 		}
 
 		if (message.type === 'requestReset') {
@@ -136,6 +198,141 @@ export async function openGraphPanel(context: vscode.ExtensionContext): Promise<
 		}
 	}
 	panel.onDidDispose(handleDispose, undefined, context.subscriptions);
+}
+
+function modelKey(model: Pick<ModelOption, 'vendor' | 'id'>): string {
+	return model.vendor + '\u0000' + model.id;
+}
+
+/** Builds a bounded, repository-grounded prompt from graph metadata and source files. */
+async function buildFlowPrompt(workspaceFolder: vscode.WorkspaceFolder, graph: Graph, model: vscode.LanguageModelChat): Promise<string> {
+	let nodes = graph.nodes.slice(0, 500).map((node) => ({ id: node.id, kind: node.kind, path: node.path }));
+	let edges = graph.edges.slice(0, 700).map((edge) => ({ from: edge.from, to: edge.to, kind: edge.kind }));
+	const sourceBudget = Math.min(20000, Math.max(4000, Math.floor(model.maxInputTokens * 0.55)));
+	const candidates = graph.nodes
+		.filter((node) => node.kind === 'file' && CODE_EXTENSIONS.some((extension) => node.path.endsWith(extension)))
+		.sort((a, b) => sourcePriority(b.path) - sourcePriority(a.path) || a.path.localeCompare(b.path));
+	const decoder = new TextDecoder();
+	const source: string[] = [];
+	let used = 0;
+	for (const node of candidates) {
+		if (used >= sourceBudget) {
+			break;
+		}
+		try {
+			const uri = vscode.Uri.joinPath(workspaceFolder.uri, node.path);
+			const bytes = await vscode.workspace.fs.readFile(uri);
+			const remaining = sourceBudget - used;
+			const content = decoder.decode(bytes).slice(0, Math.min(2400, remaining));
+			if (content.length === 0) {
+				continue;
+			}
+			source.push('FILE ' + node.path + '\n' + content);
+			used += content.length;
+		} catch {
+			// A file may have changed or disappeared since the graph was scanned; omit it from context.
+		}
+	}
+
+function makePrompt(): string {
+		return `Analyze this repository and identify up to 8 concrete user-facing or system flows (for example, sign in, create a record, submit a form, or load a page). Use the source excerpts and import graph as evidence. A flow is an ordered path through files, not a claim that import arrows prove runtime call order. Prefer distinct, meaningful scenarios; do not invent features unsupported by the repository.
+
+Return only valid JSON with this shape:
+{"flows":[{"title":"Short scenario name","summary":"One sentence","entryNodeId":"repo-relative file path","steps":[{"nodeId":"repo-relative file path","action":"What this file does in this step"}]}]}
+Every nodeId and entryNodeId must exactly match an ID in the graph. Include 2 to 8 steps per flow, in likely execution order. Keep titles and step actions concise. If evidence is insufficient, return {"flows":[]}.
+
+REPOSITORY GRAPH NODES (IDs are repository-relative paths):
+${JSON.stringify(nodes)}
+
+IMPORT EDGES (from imports to imported file):
+${JSON.stringify(edges)}
+
+SOURCE EXCERPTS:
+${source.join('\n\n')}`;
+}
+
+	let prompt = makePrompt();
+	const targetTokens = Math.max(512, Math.floor(model.maxInputTokens * 0.82));
+	for (let attempt = 0; attempt < 8; attempt++) {
+		if (await model.countTokens(prompt) <= targetTokens) {
+			return prompt;
+		}
+		if (source.length > 2) {
+			source.splice(Math.ceil(source.length * 0.75));
+		} else if (edges.length > 80) {
+			edges = edges.slice(0, Math.floor(edges.length * 0.65));
+		} else if (nodes.length > 80) {
+			nodes = nodes.slice(0, Math.floor(nodes.length * 0.65));
+		} else {
+			break;
+		}
+		prompt = makePrompt();
+	}
+	return prompt;
+}
+
+function sourcePriority(path: string): number {
+	const lower = path.toLowerCase();
+	let score = 0;
+	for (const word of ['route', 'page', 'auth', 'login', 'controller', 'handler', 'service', 'api', 'view', 'command']) {
+		if (lower.includes(word)) {
+			score += 2;
+		}
+	}
+	if (lower.startsWith('src/')) {
+		score += 1;
+	}
+	return score;
+}
+
+function parseFlowScenarios(responseText: string, graph: Graph): FlowScenario[] {
+	const jsonText = responseText.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+	const start = jsonText.indexOf('{');
+	const end = jsonText.lastIndexOf('}');
+	if (start < 0 || end <= start) {
+		return [];
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(jsonText.slice(start, end + 1));
+	} catch {
+		return [];
+	}
+	if (typeof parsed !== 'object' || parsed === null || !('flows' in parsed) || !Array.isArray(parsed.flows)) {
+		return [];
+	}
+	const fileIds = new Set(graph.nodes.filter((node) => node.kind === 'file').map((node) => node.id));
+	const valid: FlowScenario[] = [];
+	for (const item of parsed.flows) {
+		if (typeof item !== 'object' || item === null) {
+			continue;
+		}
+		const candidate = item as { title?: unknown; summary?: unknown; entryNodeId?: unknown; steps?: unknown };
+		if (typeof candidate.title !== 'string' || typeof candidate.summary !== 'string'
+			|| typeof candidate.entryNodeId !== 'string' || !Array.isArray(candidate.steps)) {
+			continue;
+		}
+		const steps = candidate.steps.filter((step): step is { nodeId: string; action: string } => {
+			if (typeof step !== 'object' || step === null) {
+				return false;
+			}
+			const row = step as { nodeId?: unknown; action?: unknown };
+			return typeof row.nodeId === 'string' && fileIds.has(row.nodeId) && typeof row.action === 'string';
+		}).slice(0, 8);
+		if (!fileIds.has(candidate.entryNodeId) || steps.length < 2 || steps[0].nodeId !== candidate.entryNodeId) {
+			continue;
+		}
+		valid.push({
+			title: candidate.title.slice(0, 120),
+			summary: candidate.summary.slice(0, 400),
+			entryNodeId: candidate.entryNodeId,
+			steps: steps,
+		});
+		if (valid.length >= 8) {
+			break;
+		}
+	}
+	return valid;
 }
 
 /**
@@ -443,6 +640,65 @@ function buildHtml(scriptUri: vscode.Uri): string {
 			text-overflow: ellipsis;
 			white-space: nowrap;
 		}
+		#flow-results {
+			display: none;
+			position: fixed;
+			top: 58px;
+			left: 12px;
+			width: min(380px, calc(100% - 24px));
+			max-height: calc(100% - 70px);
+			z-index: 1000;
+			box-sizing: border-box;
+			padding: 12px 14px;
+			overflow-y: auto;
+			cursor: default;
+			border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+			border-radius: 8px;
+			background: var(--vscode-editorWidget-background);
+			color: var(--vscode-editorWidget-foreground);
+			box-shadow: 0 4px 16px var(--vscode-widget-shadow);
+		}
+		#flow-results.visible {
+			display: block;
+		}
+		.flow-results-header {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			margin-bottom: 8px;
+		}
+		.flow-status {
+			margin-bottom: 8px;
+			color: var(--vscode-descriptionForeground);
+		}
+		.flow-card {
+			padding: 10px 0;
+			border-top: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+		}
+		.flow-card p {
+			margin: 4px 0 8px;
+			color: var(--vscode-descriptionForeground);
+		}
+		.flow-card ol {
+			margin: 0;
+			padding-left: 22px;
+		}
+		.flow-card li {
+			margin: 5px 0;
+		}
+		.flow-path-button {
+			padding: 0;
+			border: 0;
+			background: none;
+			color: var(--vscode-textLink-foreground);
+			font: inherit;
+			text-align: left;
+			cursor: pointer;
+			word-break: break-word;
+		}
+		.flow-path-button:hover {
+			text-decoration: underline;
+		}
 		.text-button svg {
 			display: block;
 			fill: none;
@@ -527,6 +783,7 @@ function buildHtml(scriptUri: vscode.Uri): string {
 <body>
 	<div id="world"></div>
 	<aside id="sidebar"></aside>
+	<aside id="flow-results" aria-live="polite"></aside>
 	<div id="toolbar"></div>
 	<script nonce="${nonce}" src="${scriptUri}"></script>
 </body>

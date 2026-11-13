@@ -60,5 +60,28 @@ export interface ModelsMessage {
 	status?: string;
 }
 
-export type WebviewToExtension = ReadyMessage | OpenMessage | SaveLayoutMessage | RequestResetMessage | DiscoverModelsMessage | SelectModelMessage;
-export type ExtensionToWebview = GraphMessage | ResetLayoutMessage | ModelsMessage;
+export interface GenerateFlowsMessage {
+	type: 'generateFlows';
+	model: ModelOption | undefined;
+}
+
+export interface FlowStep {
+	nodeId: string;
+	action: string;
+}
+
+export interface FlowScenario {
+	title: string;
+	summary: string;
+	entryNodeId: string;
+	steps: FlowStep[];
+}
+
+export interface FlowResultsMessage {
+	type: 'flowResults';
+	flows: FlowScenario[];
+	status?: string;
+}
+
+export type WebviewToExtension = ReadyMessage | OpenMessage | SaveLayoutMessage | RequestResetMessage | DiscoverModelsMessage | SelectModelMessage | GenerateFlowsMessage;
+export type ExtensionToWebview = GraphMessage | ResetLayoutMessage | ModelsMessage | FlowResultsMessage;
