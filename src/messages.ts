@@ -83,5 +83,16 @@ export interface FlowResultsMessage {
 	status?: string;
 }
 
-export type WebviewToExtension = ReadyMessage | OpenMessage | SaveLayoutMessage | RequestResetMessage | DiscoverModelsMessage | SelectModelMessage | GenerateFlowsMessage;
-export type ExtensionToWebview = GraphMessage | ResetLayoutMessage | ModelsMessage | FlowResultsMessage;
+export interface OpenFlowMessage {
+	type: 'openFlow';
+	flow: FlowScenario;
+}
+
+export interface FlowGraphMessage {
+	type: 'flowGraph';
+	graph: Graph;
+	flow: FlowScenario;
+}
+
+export type WebviewToExtension = ReadyMessage | OpenMessage | OpenFlowMessage | SaveLayoutMessage | RequestResetMessage | DiscoverModelsMessage | SelectModelMessage | GenerateFlowsMessage;
+export type ExtensionToWebview = GraphMessage | FlowGraphMessage | ResetLayoutMessage | ModelsMessage | FlowResultsMessage;

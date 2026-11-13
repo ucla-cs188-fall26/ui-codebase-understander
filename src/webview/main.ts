@@ -1,5 +1,5 @@
-import { Edge, NodeKind, ROOT_ID } from '../graph/types';
-import { ExtensionToWebview, FlowScenario, ModelOption, WebviewToExtension } from '../messages';
+import { Edge, Node, NodeKind, ROOT_ID } from '../graph/types';
+import { ExtensionToWebview, FlowGraphMessage, FlowScenario, ModelOption, WebviewToExtension } from '../messages';
 import { connections, isInside } from '../analysis/edges';
 import { getLineage, groupByParent } from '../analysis/lookups';
 import { Arrow, arrowPath, placeArrows } from '../layout/arrows';
@@ -273,6 +273,76 @@ function drawGraph(): void {
 	scheduleSave();
 }
 
+/** Draws a flow as a left-to-right sequence, reusing the graph's node boxes and arrow renderer. */
+function drawFlowGraph(view: FlowGraphMessage): void {
+	flowView = view;
+	info = undefined;
+	const toolbar = document.getElementById('toolbar')!;
+	toolbar.replaceChildren();
+	const title = document.createElement('strong');
+	title.className = 'flow-view-title';
+	title.textContent = view.flow.title;
+	toolbar.appendChild(title);
+	const fit = document.createElement('button');
+	fit.className = 'icon-button';
+	fit.title = 'Fit flow to view';
+	fit.appendChild(makeFitIcon());
+	fit.addEventListener('click', fitToView);
+	toolbar.appendChild(fit);
+
+	const description = document.getElementById('flow-description')!;
+	description.replaceChildren();
+	const summary = document.createElement('div');
+	summary.textContent = view.flow.summary;
+	description.appendChild(summary);
+	const entry = document.createElement('small');
+	entry.textContent = 'Entry point: ' + view.flow.entryNodeId;
+	description.appendChild(entry);
+	description.classList.add('visible');
+	document.getElementById('flow-results')!.classList.remove('visible');
+	document.getElementById('sidebar')!.classList.remove('visible');
+
+	const world = document.getElementById('world')!;
+	world.replaceChildren();
+	world.appendChild(makeArrowheadDefs());
+	const rects = new Map<string, Rect>();
+	const actions = new Map(view.flow.steps.map((step) => [step.nodeId, step.action]));
+	const boxWidth = 280;
+	const boxHeight = 112;
+	const gap = 110;
+	const y = Math.max(100, window.innerHeight / 2 - boxHeight / 2);
+	view.graph.nodes.forEach((node, index) => {
+		rects.set(node.id, { x: 40 + index * (boxWidth + gap), y: y, width: boxWidth, height: boxHeight });
+	});
+	const arrows = placeArrows(view.graph.edges, rects);
+	for (let i = 0; i < arrows.length; i++) {
+		world.appendChild(makeArrow(arrows[i], view.graph.edges[i], 1));
+	}
+	view.graph.nodes.forEach((node: Node, index) => {
+		const rect = rects.get(node.id)!;
+		const box = makeBox(node.name, node.kind, rect.x, rect.y, rect.width, rect.height);
+		box.classList.add('flow-node');
+		box.dataset.id = node.id;
+		box.dataset.path = node.path;
+		box.style.zIndex = '2';
+		const path = document.createElement('div');
+		path.className = 'flow-node-path';
+		path.textContent = node.path;
+		box.appendChild(path);
+		const action = document.createElement('div');
+		action.className = 'flow-step-action';
+		action.textContent = (index + 1) + '. ' + (actions.get(node.id) ?? '');
+		box.appendChild(action);
+		world.appendChild(box);
+	});
+	lastRects = rects;
+	const bounds = boundsOf(rects.values());
+	if (bounds !== undefined) {
+		camera = fitCamera(bounds, { x: 0, y: 0, width: window.innerWidth, height: window.innerHeight }, FIT_MARGIN);
+		applyCamera();
+	}
+}
+
 // the current graph's lookups, and what's open and where; undefined until a graph arrives
 let info: GraphInfo | undefined = undefined;
 let state: LayoutState = createLayoutState();
@@ -280,6 +350,7 @@ let state: LayoutState = createLayoutState();
 // the node whose details the sidebar shows, or undefined when nothing is selected
 let selectedId: string | undefined = undefined;
 let selectedEdge: Edge | undefined = undefined;
+let flowView: FlowGraphMessage | undefined;
 
 // every box drawn last time, so Fit to view can measure what's on screen
 let lastRects = new Map<string, Rect>();
@@ -681,7 +752,8 @@ function isOnOverlay(event: Event): boolean {
 	const path = event.composedPath();
 	return path.includes(document.getElementById('sidebar')!)
 		|| path.includes(document.getElementById('toolbar')!)
-		|| path.includes(document.getElementById('flow-results')!);
+		|| path.includes(document.getElementById('flow-results')!)
+		|| path.includes(document.getElementById('flow-description')!);
 }
 
 /**
@@ -819,9 +891,12 @@ function showFlowResults(flows: FlowScenario[], status?: string, loading = false
 	for (const flow of flows) {
 		const card = document.createElement('section');
 		card.className = 'flow-card';
-		const heading = document.createElement('strong');
-		heading.textContent = flow.title;
-		card.appendChild(heading);
+		const titleButton = document.createElement('button');
+		titleButton.className = 'flow-title-button';
+		titleButton.textContent = flow.title;
+		titleButton.title = 'Open this flow in a new tab';
+		titleButton.addEventListener('click', () => vscode.postMessage({ type: 'openFlow', flow: flow }));
+		card.appendChild(titleButton);
 		const summary = document.createElement('p');
 		summary.textContent = flow.summary;
 		card.appendChild(summary);
@@ -1136,7 +1211,17 @@ function moveDraggedBox(event: PointerEvent): void {
  * @param event The browser's mouse event.
  */
 function handleClick(event: MouseEvent): void {
-	if (info === undefined || isOnOverlay(event)) {
+	if (isOnOverlay(event)) {
+		return;
+	}
+	if (flowView !== undefined) {
+		const flowBox = (event.target as Element).closest<HTMLElement>('.flow-node');
+		if (flowBox?.dataset.path) {
+			vscode.postMessage({ type: 'open', path: flowBox.dataset.path, kind: 'file' });
+		}
+		return;
+	}
+	if (info === undefined) {
 		return;
 	}
 
@@ -1183,6 +1268,10 @@ function handleClick(event: MouseEvent): void {
  * @param event The browser's message event. Its data is what the extension posted.
  */
 function handleMessage(event: MessageEvent<ExtensionToWebview>): void {
+	if (event.data.type === 'flowGraph') {
+		drawFlowGraph(event.data);
+		return;
+	}
 	if (event.data.type === 'flowResults') {
 		showFlowResults(event.data.flows, event.data.status);
 		return;

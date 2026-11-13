@@ -177,6 +177,15 @@ export async function openGraphPanel(context: vscode.ExtensionContext): Promise<
 			await resetLayout();
 		}
 
+		if (message.type === 'openFlow') {
+			try {
+				const graph = await graphPromise;
+				await openFlowPanel(context, activeWorkspaceFolder, graph, message.flow);
+			} catch (error) {
+				vscode.window.showErrorMessage('Could not open the flow: ' + String(error));
+			}
+		}
+
 		if (message.type === 'open') {
 			const uri = vscode.Uri.joinPath(workspaceUri, message.path);
 			if (message.kind === 'file') {
@@ -198,6 +207,48 @@ export async function openGraphPanel(context: vscode.ExtensionContext): Promise<
 		}
 	}
 	panel.onDidDispose(handleDispose, undefined, context.subscriptions);
+}
+
+async function openFlowPanel(context: vscode.ExtensionContext, workspaceFolder: vscode.WorkspaceFolder, graph: Graph, flow: FlowScenario): Promise<void> {
+	const nodesById = new Map(graph.nodes.map((node) => [node.id, node]));
+	const seen = new Set<string>();
+	const steps = flow.steps.filter((step) => {
+		const node = nodesById.get(step.nodeId);
+		if (node === undefined || node.kind !== 'file' || seen.has(step.nodeId)) {
+			return false;
+		}
+		seen.add(step.nodeId);
+		return true;
+	});
+	if (steps.length < 2 || steps[0].nodeId !== flow.entryNodeId) {
+		vscode.window.showErrorMessage('This flow no longer matches the repository graph. Generate flows again.');
+		return;
+	}
+	const flowNodes = steps.map((step) => nodesById.get(step.nodeId)!);
+	const flowEdges = steps.slice(1).map((step, index) => ({ from: steps[index].nodeId, to: step.nodeId, kind: 'flow' as const }));
+	const flowGraph: Graph = { nodes: flowNodes, edges: flowEdges };
+	const safeFlow: FlowScenario = { ...flow, steps: steps, entryNodeId: steps[0].nodeId };
+	const distDirectory = vscode.Uri.joinPath(context.extensionUri, 'dist');
+	const panel = vscode.window.createWebviewPanel(
+		'codeflowFlow',
+		'Flow: ' + flow.title,
+		vscode.ViewColumn.Beside,
+		{ enableScripts: true, localResourceRoots: [distDirectory] },
+	);
+	const scriptUri = panel.webview.asWebviewUri(vscode.Uri.joinPath(distDirectory, 'webview.js'));
+	panel.webview.html = buildHtml(scriptUri);
+	const workspaceUri = workspaceFolder.uri;
+	const allowedPaths = new Set(flowNodes.map((node) => node.path));
+	panel.webview.onDidReceiveMessage(async (message: WebviewToExtension) => {
+		if (message.type === 'ready') {
+			const reply: ExtensionToWebview = { type: 'flowGraph', graph: flowGraph, flow: safeFlow };
+			panel.webview.postMessage(reply);
+		}
+		if (message.type === 'open' && message.kind === 'file' && allowedPaths.has(message.path)) {
+			const uri = vscode.Uri.joinPath(workspaceUri, message.path);
+			await vscode.window.showTextDocument(uri, { viewColumn: vscode.ViewColumn.Beside });
+		}
+	}, undefined, context.subscriptions);
 }
 
 function modelKey(model: Pick<ModelOption, 'vendor' | 'id'>): string {
@@ -661,6 +712,68 @@ function buildHtml(scriptUri: vscode.Uri): string {
 		#flow-results.visible {
 			display: block;
 		}
+		#flow-description {
+			display: none;
+			position: fixed;
+		top: 58px;
+			left: 12px;
+			max-width: min(560px, calc(100% - 24px));
+			z-index: 1000;
+			box-sizing: border-box;
+			padding: 10px 14px;
+			border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+			border-radius: 8px;
+			background: var(--vscode-editorWidget-background);
+			color: var(--vscode-editorWidget-foreground);
+			box-shadow: 0 4px 16px var(--vscode-widget-shadow);
+		}
+		#flow-description.visible {
+			display: grid;
+			gap: 4px;
+		}
+		#flow-description small,
+		.flow-node-path,
+		.flow-step-action {
+			color: var(--vscode-descriptionForeground);
+		}
+		.flow-view-title {
+			max-width: min(480px, 50vw);
+			padding: 0 8px;
+		overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+		.flow-node .box-title {
+			flex: 0 0 34px;
+			box-sizing: border-box;
+			border-bottom: 1px solid var(--vscode-panel-border);
+		}
+		.flow-node-path {
+			padding: 5px 10px 0;
+			overflow: hidden;
+			font-size: 11px;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+		.flow-step-action {
+			padding: 5px 10px;
+			font-size: 12px;
+			line-height: 1.3;
+		}
+		.flow-title-button {
+			padding: 0;
+			border: 0;
+			background: none;
+			color: inherit;
+			font: inherit;
+			font-weight: 600;
+			text-align: left;
+			cursor: pointer;
+		}
+		.flow-title-button:hover {
+			color: var(--vscode-textLink-foreground);
+			text-decoration: underline;
+		}
 		.flow-results-header {
 			display: flex;
 			align-items: center;
@@ -784,6 +897,7 @@ function buildHtml(scriptUri: vscode.Uri): string {
 	<div id="world"></div>
 	<aside id="sidebar"></aside>
 	<aside id="flow-results" aria-live="polite"></aside>
+	<aside id="flow-description"></aside>
 	<div id="toolbar"></div>
 	<script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
