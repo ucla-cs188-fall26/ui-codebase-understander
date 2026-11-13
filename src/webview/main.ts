@@ -1,5 +1,5 @@
 import { Edge, NodeKind, ROOT_ID } from '../graph/types';
-import { ExtensionToWebview, WebviewToExtension } from '../messages';
+import { ExtensionToWebview, ModelOption, WebviewToExtension } from '../messages';
 import { connections, isInside } from '../analysis/edges';
 import { getLineage, groupByParent } from '../analysis/lookups';
 import { Arrow, arrowPath, placeArrows } from '../layout/arrows';
@@ -688,6 +688,39 @@ function isOnOverlay(event: Event): boolean {
 function drawToolbar(): void {
 	const toolbar = document.getElementById('toolbar')!;
 
+	const modelSelect = document.createElement('select');
+	modelSelect.id = 'model-select';
+	modelSelect.title = 'Language model for future AI flow generation';
+	modelSelect.setAttribute('aria-label', 'Language model');
+	modelSelect.disabled = true;
+	const placeholder = document.createElement('option');
+	placeholder.value = '';
+	placeholder.textContent = 'Choose model';
+	modelSelect.appendChild(placeholder);
+	modelSelect.addEventListener('change', () => {
+		const model = availableModels.find((item) => modelKey(item) === modelSelect.value);
+		vscode.postMessage({ type: 'selectModel', model: model });
+	});
+	toolbar.appendChild(modelSelect);
+
+	const findModels = document.createElement('button');
+	findModels.className = 'text-button';
+	findModels.id = 'find-models';
+	findModels.textContent = 'Find models';
+	findModels.title = 'Load language models available to VS Code';
+	findModels.addEventListener('click', () => {
+		findModels.disabled = true;
+		findModels.textContent = 'Loading…';
+		modelStatus.textContent = '';
+		vscode.postMessage({ type: 'discoverModels' });
+	});
+	toolbar.appendChild(findModels);
+
+	modelStatus = document.createElement('span');
+	modelStatus.id = 'model-status';
+	modelStatus.setAttribute('role', 'status');
+	toolbar.appendChild(modelStatus);
+
 	const reset = document.createElement('button');
 	reset.className = 'icon-button';
 	reset.title = 'Reset layout';
@@ -702,6 +735,42 @@ function drawToolbar(): void {
 	fit.addEventListener('click', fitToView);
 	toolbar.appendChild(fit);
 }
+
+let availableModels: ModelOption[] = [];
+
+function modelKey(model: ModelOption): string {
+	return model.vendor + '\u0000' + model.id;
+}
+
+function showModels(models: ModelOption[], selected: ModelOption | undefined, status?: string): void {
+	availableModels = models;
+	const select = document.getElementById('model-select') as HTMLSelectElement;
+	const find = document.getElementById('find-models') as HTMLButtonElement;
+	modelStatus.textContent = status ?? (selected ? 'Selected: ' + selected.name : '');
+	find.disabled = false;
+	find.textContent = 'Find models';
+	select.replaceChildren();
+	const placeholder = document.createElement('option');
+	placeholder.value = '';
+	placeholder.textContent = 'Choose model';
+	select.appendChild(placeholder);
+	for (const model of models) {
+		const option = document.createElement('option');
+		option.value = modelKey(model);
+		option.textContent = model.name + ' (' + model.vendor + ')';
+		select.appendChild(option);
+	}
+	if (selected && !models.some((model) => modelKey(model) === modelKey(selected))) {
+		const unavailable = document.createElement('option');
+		unavailable.value = modelKey(selected);
+		unavailable.textContent = selected.name + ' (currently unavailable)';
+		select.appendChild(unavailable);
+	}
+	select.value = selected ? modelKey(selected) : '';
+	select.disabled = models.length === 0;
+}
+
+let modelStatus: HTMLElement;
 
 /**
  * Asks the extension to reset the whole layout; it confirms first, since only it can show VS Code's dialogs.
@@ -1036,7 +1105,14 @@ function handleClick(event: MouseEvent): void {
  * @param event The browser's message event. Its data is what the extension posted.
  */
 function handleMessage(event: MessageEvent<ExtensionToWebview>): void {
+	if (event.data.type === 'models') {
+		showModels(event.data.models, event.data.selected, event.data.status);
+		return;
+	}
 	if (event.data.type === 'graph') {
+		if (event.data.selectedModel !== undefined) {
+			modelStatus.textContent = 'Saved: ' + event.data.selectedModel.name + ' (refresh to check availability)';
+		}
 		info = buildGraphInfo(event.data.graph);
 
 		// pick up where the last session left off, if anything was saved

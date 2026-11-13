@@ -24,6 +24,7 @@ export interface GraphMessage {
 	type: 'graph';
 	graph: Graph;
 	layout: SavedLayout | undefined; // undefined until something has been saved for this workspace
+	selectedModel: ModelOption | undefined;
 }
 
 // sent by the extension when the user runs Reset Layout, to put the whole graph back to the default
@@ -36,5 +37,28 @@ export interface RequestResetMessage {
 	type: 'requestReset';
 }
 
-export type WebviewToExtension = ReadyMessage | OpenMessage | SaveLayoutMessage | RequestResetMessage;
-export type ExtensionToWebview = GraphMessage | ResetLayoutMessage;
+export interface ModelOption {
+	id: string;
+	vendor: string;
+	name: string;
+	family: string;
+}
+
+export interface DiscoverModelsMessage {
+	type: 'discoverModels';
+}
+
+export interface SelectModelMessage {
+	type: 'selectModel';
+	model: ModelOption | undefined;
+}
+
+export interface ModelsMessage {
+	type: 'models';
+	models: ModelOption[];
+	selected: ModelOption | undefined;
+	status?: string;
+}
+
+export type WebviewToExtension = ReadyMessage | OpenMessage | SaveLayoutMessage | RequestResetMessage | DiscoverModelsMessage | SelectModelMessage;
+export type ExtensionToWebview = GraphMessage | ResetLayoutMessage | ModelsMessage;

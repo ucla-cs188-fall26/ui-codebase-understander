@@ -1,11 +1,12 @@
 import * as vscode from 'vscode';
 import { randomBytes } from 'crypto';
 import { loadGraph } from './loadGraph';
-import { ExtensionToWebview, WebviewToExtension } from '../messages';
+import { ExtensionToWebview, ModelOption, WebviewToExtension } from '../messages';
 import { SavedLayout } from '../layout/saved';
 
 // where this workspace's layout is kept in VS Code's per-workspace storage
 const LAYOUT_KEY = 'codeflow.layout';
+const MODEL_KEY = 'codeflow.languageModel';
 
 // the graph panel that's open, so commands like Reset Layout can reach it; undefined when it's closed
 let currentPanel: vscode.WebviewPanel | undefined = undefined;
@@ -66,7 +67,8 @@ export async function openGraphPanel(context: vscode.ExtensionContext): Promise<
 			try {
 				const graph = await graphPromise;
 				const layout = context.workspaceState.get<SavedLayout>(LAYOUT_KEY);
-				const reply: ExtensionToWebview = { type: 'graph', graph: graph, layout: layout };
+				const selectedModel = context.workspaceState.get<ModelOption>(MODEL_KEY);
+				const reply: ExtensionToWebview = { type: 'graph', graph: graph, layout: layout, selectedModel: selectedModel };
 				panel.webview.postMessage(reply);
 			} catch (error) {
 				vscode.window.showErrorMessage('Could not build the graph: ' + String(error));
@@ -75,6 +77,38 @@ export async function openGraphPanel(context: vscode.ExtensionContext): Promise<
 
 		if (message.type === 'saveLayout') {
 			await context.workspaceState.update(LAYOUT_KEY, message.layout);
+		}
+
+		if (message.type === 'discoverModels') {
+			try {
+				// This is deliberately initiated by the user's click: VS Code may ask for consent here.
+				const models = await vscode.lm.selectChatModels();
+				const options: ModelOption[] = models.map((model) => ({
+					id: model.id,
+					vendor: model.vendor,
+					name: model.name,
+					family: model.family,
+				}));
+				const selected = context.workspaceState.get<ModelOption>(MODEL_KEY);
+				panel.webview.postMessage({
+					type: 'models',
+					models: options,
+					selected: selected,
+					status: options.length === 0 ? 'No language models are available to this extension.' : undefined,
+				});
+			} catch (error) {
+				const selected = context.workspaceState.get<ModelOption>(MODEL_KEY);
+				panel.webview.postMessage({
+					type: 'models',
+					models: [],
+					selected: selected,
+					status: 'Could not load models: ' + String(error),
+				});
+			}
+		}
+
+		if (message.type === 'selectModel') {
+			await context.workspaceState.update(MODEL_KEY, message.model);
 		}
 
 		if (message.type === 'requestReset') {
@@ -382,6 +416,32 @@ function buildHtml(scriptUri: vscode.Uri): string {
 		}
 		.text-button:hover {
 			background: var(--vscode-toolbar-activeBackground);
+		}
+		.text-button:disabled {
+			cursor: wait;
+			opacity: 0.7;
+		}
+		#model-select {
+			max-width: 230px;
+			padding: 3px 6px;
+			border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+			border-radius: 4px;
+			background: var(--vscode-dropdown-background);
+			color: var(--vscode-dropdown-foreground);
+			font: inherit;
+		}
+		#model-select:disabled {
+			opacity: 0.75;
+		}
+		#model-status {
+			align-self: center;
+			max-width: 220px;
+			padding: 0 4px;
+			overflow: hidden;
+			color: var(--vscode-descriptionForeground);
+			font-size: 11px;
+			text-overflow: ellipsis;
+			white-space: nowrap;
 		}
 		.text-button svg {
 			display: block;
