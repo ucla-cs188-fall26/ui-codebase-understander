@@ -85,11 +85,18 @@ function packRow(row: string[], rects: Map<string, Rect>, width: number): { plac
 
 	// how much of each space's spare room is kept: 1 leaves the row as it is, 0 packs it as tight as it goes
 	let keep = 1;
+	let fits = true;
 	if (covered + spaceTotal > width) {
 		const spare = spaceTotal - minSpaceTotal;
-		keep = spare > 0 ? (width - covered - minSpaceTotal) / spare : 0;
+		if (spare > 0) {
+			keep = (width - covered - minSpaceTotal) / spare;
+			fits = keep >= 0;
+		} else {
+			// the spaces are as small as they go already, and it still sticks out
+			keep = 0;
+			fits = false;
+		}
 	}
-	const fits = keep >= 0;
 	keep = Math.max(0, keep);
 
 	// each stretch moves as one, so its boxes keep their offsets from each other

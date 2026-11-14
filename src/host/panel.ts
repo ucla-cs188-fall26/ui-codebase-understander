@@ -458,25 +458,43 @@ function buildHtml(scriptUri: vscode.Uri): string {
 			overflow: visible;
 			pointer-events: none;
 		}
+		/* --arrow-width is set on each arrow, thicker the more imports it stands for */
 		.arrow path {
 			fill: none;
 			stroke: var(--vscode-editorLineNumber-foreground);
-			stroke-width: 2.5;
+			stroke-width: var(--arrow-width, 1.5px);
+		}
+		/* the wide, invisible copy of each arrow that catches its clicks */
+		.arrow path.arrow-hit {
+			stroke: transparent;
+			stroke-width: 12;
 			pointer-events: stroke;
 			cursor: pointer;
 		}
-		.arrow.selected path {
-			stroke: var(--vscode-focusBorder, var(--vscode-textLink-foreground));
-			stroke-width: 3;
-			filter: drop-shadow(0 0 4px var(--vscode-focusBorder, var(--vscode-textLink-foreground)));
-		}
-		#arrowheads {
-			position: absolute;
-			width: 0;
-			height: 0;
-		}
-		#arrowheads path {
+		/* each arrow's head, a filled triangle drawn with it, so it takes the same colors as its line */
+		.arrow path.arrow-head {
 			fill: var(--vscode-editorLineNumber-foreground);
+			stroke: none;
+		}
+		.arrow:hover path.arrow-line {
+			stroke: var(--vscode-editor-foreground);
+		}
+		.arrow:hover path.arrow-head {
+			fill: var(--vscode-editor-foreground);
+		}
+		/* a selected arrow keeps its width and turns yellow */
+		.arrow.selected path.arrow-line {
+			stroke: var(--vscode-charts-yellow, #e2c08d);
+		}
+		.arrow.selected path.arrow-head {
+			fill: var(--vscode-charts-yellow, #e2c08d);
+		}
+		/* arrows that aren't the selected box's, in the default arrow setting */
+		.arrow.faint {
+			opacity: 0.3;
+		}
+		.arrow.faint:hover {
+			opacity: 1;
 		}
 		/* a column: the title on top, and for an open box, room for its children below */
 		.box {
@@ -534,7 +552,12 @@ function buildHtml(scriptUri: vscode.Uri): string {
 			font-weight: 600;
 		}
 		.box.selected {
-			border-color: var(--vscode-focusBorder);
+			border-color: var(--vscode-charts-yellow, #e2c08d);
+		}
+		/* the box under the mouse, so it's clear which one a click would act on; the selected box keeps its own
+		   border, and nothing lights up while dragging, panning, or resizing */
+		body:not(.dragging):not(.panning):not(.resizing) .box:hover:not(.selected) {
+			border-color: var(--vscode-descriptionForeground);
 		}
 		.chevron {
 			display: inline-flex;
@@ -642,6 +665,11 @@ function buildHtml(scriptUri: vscode.Uri): string {
 			stroke: currentColor;
 			stroke-width: 1.5;
 		}
+		/* the parts of an icon drawn solid, like the arrows icon's dot */
+		.icon-button svg .icon-fill {
+			fill: currentColor;
+			stroke: none;
+		}
 		.sidebar-actions {
 			display: flex;
 			flex-wrap: wrap;
@@ -649,6 +677,61 @@ function buildHtml(scriptUri: vscode.Uri): string {
 			margin: 10px 0 14px;
 		}
 		/* toolbar grays and a widget border, which every theme shows; some themes leave secondary button colors transparent */
+		/* a thin line between groups of toolbar controls */
+		.toolbar-divider {
+			align-self: stretch;
+			width: 1px;
+			margin: 2px 4px;
+			background: var(--vscode-widget-border, var(--vscode-panel-border));
+		}
+		/* a toolbar button with its popup, which hangs below it */
+		.popup-anchor {
+			position: relative;
+			display: flex;
+		}
+		.popup {
+			display: none;
+			position: absolute;
+			top: calc(100% + 10px);
+			left: 0;
+			min-width: 260px;
+			flex-direction: column;
+			gap: 10px;
+			padding: 10px 12px;
+			border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+			border-radius: 8px;
+			background: var(--vscode-editorWidget-background);
+			box-shadow: 0 4px 16px var(--vscode-widget-shadow);
+		}
+		.popup.visible {
+			display: flex;
+		}
+		.popup-heading {
+			font-weight: 600;
+		}
+		/* a label, then its control */
+		.popup-row {
+			display: grid;
+			grid-template-columns: 3.5em 1fr;
+			align-items: center;
+			column-gap: 8px;
+		}
+		.popup-control {
+			display: flex;
+			align-items: center;
+			gap: 2px;
+		}
+		/* the arrow strength that's on */
+		.text-button[aria-pressed="true"] {
+			border-color: var(--vscode-focusBorder);
+			background: var(--vscode-toolbar-activeBackground);
+		}
+		.settings-row {
+			display: flex;
+			flex-wrap: wrap;
+			align-items: center;
+			gap: 6px;
+		}
 		.text-button {
 			display: inline-flex;
 			align-items: center;
@@ -669,7 +752,8 @@ function buildHtml(scriptUri: vscode.Uri): string {
 			cursor: wait;
 			opacity: 0.7;
 		}
-		#model-select {
+		#model-select,
+		#arrow-depth {
 			max-width: 230px;
 			padding: 3px 6px;
 			border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
@@ -677,6 +761,21 @@ function buildHtml(scriptUri: vscode.Uri): string {
 			background: var(--vscode-dropdown-background);
 			color: var(--vscode-dropdown-foreground);
 			font: inherit;
+		}
+		#arrow-depth {
+			width: 3.5em;
+		}
+		/* in dark themes, draw the field's up/down arrows dark too; the browser's own are white by default */
+		body.vscode-dark #arrow-depth,
+		body.vscode-high-contrast #arrow-depth {
+			color-scheme: dark;
+		}
+		/* the deepest level, dimmed beside the depth */
+		#arrow-depth-max {
+			align-self: center;
+			padding: 0 2px;
+			color: var(--vscode-descriptionForeground);
+			font-size: 11px;
 		}
 		#model-select:disabled {
 			opacity: 0.75;

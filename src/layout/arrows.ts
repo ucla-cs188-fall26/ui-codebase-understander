@@ -4,6 +4,16 @@ import { Position, Rect } from './geometry';
 export type Side = 'left' | 'right' | 'top' | 'bottom';
 
 /**
+ * Picks how thick an arrow draws: thicker the more of the graph's edges it stands for, growing slower as the count
+ * rises, up to a limit, so one busy arrow can't drown out the rest.
+ * @param count How many edges it stands for.
+ * @returns Its line width, in pixels: 1.5 for one edge, at most 5.
+ */
+export function arrowWidth(count: number): number {
+	return Math.min(5, 1.5 + Math.log2(count));
+}
+
+/**
  * Finds the middle of a box.
  * @param rect The box.
  * @returns Its center point.
@@ -196,11 +206,37 @@ function directionOf(side: Side): Position {
 }
 
 /**
+ * Works out an arrow's head: a triangle with its tip on the arrow's end, pointing into the box. The curve always
+ * arrives head-on, so the head lines up with the side it ends at. Thicker arrows get bigger heads, so the line never
+ * shows past the head's sides.
+ * @param arrow The arrow, from placeArrows.
+ * @param width The arrow's line width, from arrowWidth.
+ * @returns How long the head is along the arrow, and the triangle as SVG path data.
+ */
+export function arrowHead(arrow: Arrow, width: number): { length: number; path: string } {
+	// 9 for a normal 1.5px arrow, the size heads have always been
+	const length = 6 + 2 * width;
+
+	// back from the tip, out of the box, to the middle of the head's base; then half the base to each side
+	const out = directionOf(arrow.endSide);
+	const base = { x: arrow.end.x + out.x * length, y: arrow.end.y + out.y * length };
+	const across = { x: -out.y * length / 2, y: out.x * length / 2 };
+
+	const path = 'M ' + arrow.end.x + ' ' + arrow.end.y
+		+ ' L ' + (base.x + across.x) + ' ' + (base.y + across.y)
+		+ ' L ' + (base.x - across.x) + ' ' + (base.y - across.y)
+		+ ' Z';
+	return { length: length, path: path };
+}
+
+/**
  * Draws an arrow as a smooth curve that leaves and enters its boxes head-on.
  * @param arrow The arrow, from placeArrows.
+ * @param endGap How far before the arrow's end the curve stops, straight out from the side it ends at, so an
+ *   arrowhead can fill the rest. The curve's shape doesn't change.
  * @returns An SVG path: move to the start, then a cubic curve through two pull points to the end.
  */
-export function arrowPath(arrow: Arrow): string {
+export function arrowPath(arrow: Arrow, endGap: number = 0): string {
 	// pull further for longer arrows, so they curve gently instead of kinking
 	const distance = Math.hypot(arrow.end.x - arrow.start.x, arrow.end.y - arrow.start.y);
 	const pull = Math.max(MIN_PULL, distance / 2);
@@ -211,9 +247,10 @@ export function arrowPath(arrow: Arrow): string {
 	// each pull point sits straight out from its side
 	const pull1 = { x: arrow.start.x + startDirection.x * pull, y: arrow.start.y + startDirection.y * pull };
 	const pull2 = { x: arrow.end.x + endDirection.x * pull, y: arrow.end.y + endDirection.y * pull };
+	const end = { x: arrow.end.x + endDirection.x * endGap, y: arrow.end.y + endDirection.y * endGap };
 
 	return 'M ' + arrow.start.x + ' ' + arrow.start.y
 		+ ' C ' + pull1.x + ' ' + pull1.y
 		+ ', ' + pull2.x + ' ' + pull2.y
-		+ ', ' + arrow.end.x + ' ' + arrow.end.y;
+		+ ', ' + end.x + ' ' + end.y;
 }

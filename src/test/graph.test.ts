@@ -6,13 +6,13 @@ import { computeIndegrees, sortChildren } from '../analysis/metrics';
 import { connections, findChildContaining, liftEdges } from '../analysis/edges';
 import { assignColumns, findBackEdges } from '../layout/columns';
 import { defaultLayout, GAP } from '../layout/defaultLayout';
-import { arrowPath, chooseSides, placeArrows } from '../layout/arrows';
+import { arrowHead, arrowPath, arrowWidth, chooseSides, placeArrows } from '../layout/arrows';
 import { fitCamera, MAX_SCALE, zoomAt } from '../layout/camera';
 import { boundsOf } from '../layout/geometry';
-import { arrangeChildren, arrangeShown, boxSize, changeSize, buildGraphInfo, childOrigin, closeNode, createLayoutState, defaultSize, GraphInfo, LayoutState, moveTo, openNode, resetNode, resizeTo } from '../layout/state';
-import { arrowZIndex, boxZIndexes, placeBoxes, placeStrips, stripId, visibleEdges } from '../layout/place';
+import { arrangeChildren, arrangeShown, boxSize, changeSize, buildGraphInfo, childOrigin, closeNode, copyLayoutState, createLayoutState, defaultSize, GraphInfo, LayoutState, moveTo, openNode, resetNode, resizeTo, showMoreFromStrip } from '../layout/state';
+import { arrowTouches, arrowZIndex, boxesUnderArrow, boxZIndexes, placeBoxes, placeStrips, stripId, visibleEdges } from '../layout/place';
 import { fromSaved, toSaved } from '../layout/saved';
-import { dropAt, settleDrop } from '../layout/drop';
+import { dragTo, dropAt, settleDrop } from '../layout/drop';
 import { minSquishHeight, minSquishWidth, squishHorizontally, squishVertically } from '../layout/squish';
 import { nodeSize } from '../layout/size';
 import { Edge, ROOT_ID } from '../graph/types';
@@ -416,6 +416,34 @@ suite('placeArrows', () => {
 	});
 });
 
+suite('arrowWidth', () => {
+	test('is thin for one import, thicker for more, and stops at a limit', () => {
+		assert.strictEqual(arrowWidth(1), 1.5);
+		assert.strictEqual(arrowWidth(2), 2.5);
+		assert.strictEqual(arrowWidth(1000), 5);
+	});
+});
+
+suite('arrowHead', () => {
+	// an arrow coming in from the left, ending on a box's left side at (100, 50)
+	const arrow = { from: 'a', to: 'b', start: { x: 0, y: 0 }, startSide: 'right' as const, end: { x: 100, y: 50 }, endSide: 'left' as const };
+
+	test('puts a 9px head on a normal arrow, its tip on the end and its base straight out from the side', () => {
+		const head = arrowHead(arrow, 1.5);
+
+		assert.strictEqual(head.length, 9);
+		assert.strictEqual(head.path, 'M 100 50 L 91 45.5 L 91 54.5 Z');
+	});
+
+	test('gives a thicker arrow a bigger head', () => {
+		assert.ok(arrowHead(arrow, 5).length > arrowHead(arrow, 1.5).length);
+	});
+
+	test('stops the line a gap before the end, straight out from the side', () => {
+		assert.ok(arrowPath(arrow, 8).endsWith(', 92 50'));
+	});
+});
+
 suite('arrowPath', () => {
 	test('pulls straight out of each side by half the distance', () => {
 		const arrow = {
@@ -695,7 +723,19 @@ suite('placing boxes', () => {
 		const rects = placeBoxes(state, info, { x: 0, y: 0 });
 
 		// a.ts imports lib/b.ts, and lib is closed, so the arrow ends at lib
-		assert.deepStrictEqual(visibleEdges(state, info, rects), [edge('src/a.ts', 'src/lib')]);
+		assert.deepStrictEqual(visibleEdges(state, info, rects), [{ from: 'src/a.ts', to: 'src/lib', kind: 'import', count: 1, edges: [edge('src/a.ts', 'src/lib/b.ts')] }]);
+	});
+
+	test('counts the imports that land on one arrow', () => {
+		// a.ts imports both files in lib, which is closed, so both land on one arrow to lib
+		const nodes = buildTree('repo', ['src/a.ts', 'src/lib/b.ts', 'src/lib/c.ts']);
+		const info = buildGraphInfo({ nodes: nodes, edges: [edge('src/a.ts', 'src/lib/b.ts'), edge('src/a.ts', 'src/lib/c.ts')] });
+		const state = createLayoutState();
+		openNode(state, info, ROOT_ID);
+		openNode(state, info, 'src');
+		const rects = placeBoxes(state, info, { x: 0, y: 0 });
+
+		assert.deepStrictEqual(visibleEdges(state, info, rects), [{ from: 'src/a.ts', to: 'src/lib', kind: 'import', count: 2, edges: [edge('src/a.ts', 'src/lib/b.ts'), edge('src/a.ts', 'src/lib/c.ts')] }]);
 	});
 
 	test('draws no arrow when both ends are in one closed box', () => {
@@ -843,6 +883,38 @@ suite('settleDrop', () => {
 		assert.deepStrictEqual(state.homes.get('b.ts'), { x: 290, y: 0 });
 		assert.deepStrictEqual(state.homes.get('c.ts'), { x: 390 + GAP, y: 0 });
 	});
+
+	test('while dragging, grows the directory and moves what\'s in its way, the same as a drop', () => {
+		// d holds two files side by side, and c sits below d in its column
+		const { info, state } = makeBoxes([['d/a.ts', { x: 0, y: 0 }], ['d/b.ts', { x: 150, y: 0 }], ['c.ts', { x: 0, y: 300 }]]);
+		state.expanded.add('d');
+		state.homes.set('d', { x: 0, y: 0 });
+		const before = boxSize(state, info, 'd');
+
+		dragTo(state, info, 'd/a.ts', { x: 0, y: 400 });
+
+		const grown = boxSize(state, info, 'd').height - before.height;
+		assert.ok(grown > 0);
+		assert.deepStrictEqual(state.homes.get('c.ts'), { x: 0, y: 300 + grown });
+	});
+
+	test('while dragging, pushes nothing the box is over', () => {
+		const { info, state } = makeBoxes([['a.ts', { x: 0, y: 0 }], ['b.ts', { x: 200, y: 0 }]]);
+
+		dragTo(state, info, 'a.ts', { x: 180, y: 0 });
+
+		assert.deepStrictEqual(state.homes.get('a.ts'), { x: 180, y: 0 });
+		assert.deepStrictEqual(state.homes.get('b.ts'), { x: 200, y: 0 });
+	});
+
+	test('a copy of the state can change without changing the original', () => {
+		const { info, state } = makeBoxes([['a.ts', { x: 0, y: 0 }]]);
+
+		const copy = copyLayoutState(state);
+		dragTo(copy, info, 'a.ts', { x: 500, y: 500 });
+
+		assert.deepStrictEqual(state.homes.get('a.ts'), { x: 0, y: 0 });
+	});
 });
 
 suite('resizeTo', () => {
@@ -906,6 +978,111 @@ suite('arrangeShown', () => {
 	});
 });
 
+suite('showing more from a strip', () => {
+	// a directory with some files and, at the top level, a file below it; nothing imports anything, so the directory's
+	// files stack in one column and the ones past the limit wait behind the bottom strip
+	function makeFolder(fileCount: number) {
+		const paths: string[] = ['q.ts'];
+		for (let i = 1; i <= fileCount; i++) {
+			paths.push('p/f' + (i + 10) + '.ts');
+		}
+		const info = buildGraphInfo({ nodes: buildTree('repo', paths), edges: [] });
+		const state = createLayoutState();
+		openNode(state, info, ROOT_ID);
+		openNode(state, info, 'p');
+		return { info: info, state: state };
+	}
+
+	test('shows the children behind the strip, and the strip goes away', () => {
+		const { info, state } = makeFolder(7);
+
+		showMoreFromStrip(state, info, 'p', 'bottom');
+		const shown = arrangeShown(state, info, 'p');
+
+		assert.strictEqual(shown.rects.size, 7);
+		assert.deepStrictEqual(shown.hiddenBottom, []);
+		assert.deepStrictEqual(shown.hiddenRight, []);
+	});
+
+	test('brings out at most CHILD_LIMIT children per click', () => {
+		const { info, state } = makeFolder(12);
+
+		showMoreFromStrip(state, info, 'p', 'bottom');
+		const shown = arrangeShown(state, info, 'p');
+
+		assert.strictEqual(shown.rects.size, 2 * CHILD_LIMIT);
+		assert.strictEqual(shown.hiddenBottom.length, 2);
+	});
+
+	test('grows a squished directory back to fit before bringing out more', () => {
+		const { info, state } = makeFolder(7);
+		const fits = boxSize(state, info, 'p');
+		resizeTo(state, info, 'p', { width: fits.width, height: 0 });
+
+		showMoreFromStrip(state, info, 'p', 'bottom');
+		const shown = arrangeShown(state, info, 'p');
+
+		assert.ok(!state.openSizes.has('p'));
+		assert.strictEqual(shown.rects.size, CHILD_LIMIT);
+		assert.strictEqual(shown.hiddenBottom.length, 2);
+	});
+
+	test('moves a box below the directory down by exactly how much it grew', () => {
+		const { info, state } = makeFolder(7);
+		const sizeBefore = boxSize(state, info, 'p');
+		const homeBefore = state.homes.get('q.ts')!;
+
+		showMoreFromStrip(state, info, 'p', 'bottom');
+
+		const grown = boxSize(state, info, 'p').height - sizeBefore.height;
+		assert.ok(grown > 0);
+		assert.strictEqual(state.homes.get('q.ts')!.y, homeBefore.y + grown);
+	});
+
+	test('stacks children from the bottom strip in one column below every box that was there', () => {
+		const { info, state } = makeFolder(7);
+		const before = arrangeChildren(state, info, 'p');
+		let left = Infinity;
+		let bottom = 0;
+		for (const rect of before.values()) {
+			left = Math.min(left, rect.x);
+			bottom = Math.max(bottom, rect.y + rect.height);
+		}
+
+		showMoreFromStrip(state, info, 'p', 'bottom');
+
+		for (const [id, rect] of arrangeChildren(state, info, 'p')) {
+			if (!before.has(id)) {
+				assert.strictEqual(rect.x, left);
+				assert.ok(rect.y > bottom);
+			}
+		}
+	});
+
+	test('can still be squished down to 3 after bringing children out', () => {
+		const { info, state } = makeFolder(7);
+		showMoreFromStrip(state, info, 'p', 'bottom');
+		const fits = boxSize(state, info, 'p');
+
+		resizeTo(state, info, 'p', { width: fits.width, height: 0 });
+		const shown = arrangeShown(state, info, 'p');
+
+		assert.strictEqual(shown.rects.size, 3);
+		assert.strictEqual(shown.hiddenBottom.length, 4);
+	});
+
+	test('resetting the directory puts the children back behind the strip', () => {
+		const { info, state } = makeFolder(7);
+		showMoreFromStrip(state, info, 'p', 'bottom');
+
+		resetNode(state, info, 'p');
+		const shown = arrangeShown(state, info, 'p');
+
+		assert.strictEqual(shown.rects.size, CHILD_LIMIT);
+		assert.strictEqual(shown.hiddenBottom.length, 2);
+	});
+});
+
 suite('resizing inside a directory', () => {
 	test('grows a directory the user sized, when a child is made bigger than it', () => {
 		const info = makeInfo();
@@ -918,6 +1095,28 @@ suite('resizing inside a directory', () => {
 		resizeTo(state, info, 'src/a.ts', { width: 100, height: 2000 });
 
 		assert.ok(boxSize(state, info, 'src').height > before.height);
+	});
+
+	test('a directory at its smallest still holds every box it shows, after squishing across slides them', () => {
+		// a and b share a row; c sits below, between them. Squishing across slides c under b, into b's column
+		const info = buildGraphInfo({ nodes: buildTree('repo', ['p/a.ts', 'p/b.ts', 'p/c.ts']), edges: [] });
+		const state = createLayoutState();
+		state.expanded.add('p');
+		state.homes.set('p', { x: 0, y: 0 });
+		state.homes.set('p/a.ts', { x: 0, y: 0 });
+		state.homes.set('p/b.ts', { x: 300, y: 0 });
+		state.homes.set('p/c.ts', { x: 150, y: 60 });
+		for (const id of ['p/a.ts', 'p/b.ts', 'p/c.ts']) {
+			state.closedSizes.set(id, { width: 100, height: 50 });
+		}
+
+		resizeTo(state, info, 'p', { width: 0, height: 0 });
+
+		// the inside ends one padding above the bottom; childOrigin's x is the padding
+		const insideHeight = boxSize(state, info, 'p').height - childOrigin().y - childOrigin().x;
+		for (const rect of arrangeShown(state, info, 'p').rects.values()) {
+			assert.ok(rect.y + rect.height <= insideHeight);
+		}
 	});
 });
 
@@ -955,6 +1154,18 @@ suite('squishHorizontally', () => {
 		assert.ok(Math.abs(gapBC - gapAB) < 0.001);
 		assert.ok(Math.abs(gapCD - gapAB) < 0.001);
 		assert.ok(Math.abs(xOf(squished.rects, 'd') + 100 - 480) < 0.001);
+	});
+
+	test('says it doesn\'t fit when the gaps are already as small as they go and the row still sticks out', () => {
+		// two boxes MIN_GAP apart, starting at the wall: nothing left to shrink, and they need 210
+		const rects = new Map([
+			['a', { x: 0, y: 0, width: 100, height: 50 }],
+			['b', { x: 110, y: 0, width: 100, height: 50 }],
+		]);
+
+		const squished = squishHorizontally(rects, 150);
+
+		assert.strictEqual(squished.fits, false);
 	});
 
 	test('hides the latest box in a row that is packed tight and still doesn\'t fit', () => {
@@ -1151,16 +1362,18 @@ suite('saving the layout', () => {
 		const camera = { x: 10, y: 20, scale: 1.5 };
 
 		// through JSON text, the way a message or VS Code's storage carries it
-		const text = JSON.stringify(toSaved(state, camera));
+		const text = JSON.stringify(toSaved(state, camera, 'hidden', 3));
 		const restored = fromSaved(JSON.parse(text), info);
 
 		assert.deepStrictEqual(restored.state, state);
 		assert.deepStrictEqual(restored.camera, camera);
+		assert.strictEqual(restored.arrowMode, 'hidden');
+		assert.strictEqual(restored.arrowDepth, 3);
 	});
 
 	test('drops anything about nodes that no longer exist', () => {
 		const info = makeInfo();
-		const saved = toSaved(createLayoutState(), { x: 0, y: 0, scale: 1 });
+		const saved = toSaved(createLayoutState(), { x: 0, y: 0, scale: 1 }, 'default', 1);
 		saved.expanded.push('deleted');
 		saved.homes.push(['deleted/file.ts', { x: 1, y: 1 }]);
 
@@ -1168,6 +1381,28 @@ suite('saving the layout', () => {
 
 		assert.ok(!restored.state.expanded.has('deleted'));
 		assert.ok(!restored.state.homes.has('deleted/file.ts'));
+	});
+
+	test('uses the default arrow settings for a layout saved before the settings existed', () => {
+		const info = makeInfo();
+		const saved = toSaved(createLayoutState(), { x: 0, y: 0, scale: 1 }, 'full', 4);
+		delete saved.arrowMode;
+		delete saved.arrowDepth;
+
+		const restored = fromSaved(saved, info);
+
+		assert.strictEqual(restored.arrowMode, 'default');
+		assert.strictEqual(restored.arrowDepth, 1);
+	});
+
+	test('uses depth 1 for a depth that isn\'t a number, like one saved when the depth was picked from a list', () => {
+		const info = makeInfo();
+		const saved = JSON.parse(JSON.stringify(toSaved(createLayoutState(), { x: 0, y: 0, scale: 1 }, 'full', 4)));
+		saved.arrowDepth = 'all';
+
+		const restored = fromSaved(saved, info);
+
+		assert.strictEqual(restored.arrowDepth, 1);
 	});
 });
 
@@ -1291,7 +1526,7 @@ suite('placeStrips', () => {
 
 		const edges = visibleEdges(state, info, rects, placeStrips(state, info, rects));
 
-		assert.deepStrictEqual(edges, [edge(stripId('p', 'bottom'), 'p/f1.ts')]);
+		assert.deepStrictEqual(edges, [{ from: stripId('p', 'bottom'), to: 'p/f1.ts', kind: 'import', count: 1, edges: [edge('p/f7.ts', 'p/f1.ts')] }]);
 		const boxZ = boxZIndexes(rects);
 		assert.strictEqual(arrowZIndex(edges[0], state, info, boxZ), boxZ.get('p')! + 1);
 	});
@@ -1340,5 +1575,148 @@ suite('paint order', () => {
 		const boxZ = boxZIndexes(placeBoxes(state, info, { x: 0, y: 0 }));
 
 		assert.strictEqual(arrowZIndex(edge('src', 'top.ts'), state, info, boxZ), 1);
+	});
+
+	// top.ts and two open directories: app holds db.ts and a closed api, and other holds y.ts
+	function makeTwoOpen() {
+		const nodes = buildTree('repo', ['top.ts', 'app/db.ts', 'app/api/x.ts', 'other/y.ts']);
+		const info = buildGraphInfo({ nodes: nodes, edges: [edge('top.ts', 'app/db.ts')] });
+		const state = createLayoutState();
+		openNode(state, info, ROOT_ID);
+		openNode(state, info, 'app');
+		openNode(state, info, 'other');
+		const rects = placeBoxes(state, info, { x: 0, y: 0 });
+		return { info: info, rects: rects };
+	}
+
+	test('an arrow passes under every box but its ends and the open boxes holding them, outermost only', () => {
+		const { info, rects } = makeTwoOpen();
+
+		const under = boxesUnderArrow(edge('top.ts', 'app/db.ts'), info, rects);
+
+		// app's other child and the other top-level directory; y.ts is covered by other, so it isn't listed
+		assert.deepStrictEqual(under.toSorted(), ['app/api', 'other']);
+	});
+
+	test('an arrow to a strip counts the strip\'s box as holding it', () => {
+		const { info, rects } = makeTwoOpen();
+
+		const under = boxesUnderArrow(edge('top.ts', stripId('app', 'bottom')), info, rects);
+
+		assert.ok(!under.includes('app'));
+		assert.ok(under.includes('app/db.ts'));
+	});
+
+	// an arrow as visibleEdges makes it, drawn between two ends and carrying the given edges
+	function carrying(from: string, to: string, edges: Edge[]) {
+		return { from: from, to: to, kind: 'import' as const, count: edges.length, edges: edges };
+	}
+
+	test('an arrow from a file inside a box belongs to the box', () => {
+		const { info } = makeTwoOpen();
+		const arrow = carrying('top.ts', 'app/db.ts', [edge('top.ts', 'app/db.ts')]);
+
+		assert.ok(arrowTouches(arrow, 'app', info));
+		assert.ok(arrowTouches(arrow, 'top.ts', info));
+	});
+
+	test('an arrow to a strip belongs to the strip\'s box', () => {
+		const { info } = makeTwoOpen();
+
+		assert.ok(arrowTouches(carrying('top.ts', stripId('app', 'bottom'), [edge('top.ts', 'app/api/x.ts')]), 'app', info));
+	});
+
+	test('an arrow between two other boxes doesn\'t belong to a box', () => {
+		const { info } = makeTwoOpen();
+		const arrow = carrying('top.ts', 'app/db.ts', [edge('top.ts', 'app/db.ts')]);
+
+		assert.ok(!arrowTouches(arrow, 'other', info));
+		assert.ok(!arrowTouches(arrow, 'app/api', info));
+	});
+});
+
+suite('arrow depth', () => {
+	// app holds api (login, session), db (users), and config.ts; scripts holds seed. Everything is open
+	function makeApp() {
+		const nodes = buildTree('repo', ['app/api/login.ts', 'app/api/session.ts', 'app/db/users.ts', 'app/config.ts', 'scripts/seed.ts']);
+		const edges = [
+			edge('app/api/login.ts', 'app/db/users.ts'),
+			edge('app/api/login.ts', 'app/api/session.ts'),
+			edge('app/api/login.ts', 'scripts/seed.ts'),
+			edge('app/api/session.ts', 'app/db/users.ts'),
+			edge('app/api/session.ts', 'app/config.ts'),
+		];
+		const info = buildGraphInfo({ nodes: nodes, edges: edges });
+		const state = createLayoutState();
+		for (const id of [ROOT_ID, 'app', 'app/api', 'app/db', 'scripts']) {
+			openNode(state, info, id);
+		}
+		const rects = placeBoxes(state, info, { x: 0, y: 0 });
+		return { info: info, state: state, rects: rects };
+	}
+
+	// each arrow as "from > to xCount", easy to read in a failure
+	function describe(edges: { from: string; to: string; count: number }[]): string[] {
+		const described: string[] = [];
+		for (const visible of edges) {
+			described.push(visible.from + ' > ' + visible.to + ' x' + visible.count);
+		}
+		return described;
+	}
+
+	test('at depth 1, each arrow joins the outermost boxes that differ, and arrows on the same two boxes merge', () => {
+		const { info, state, rects } = makeApp();
+
+		const edges = visibleEdges(state, info, rects, [], 1);
+
+		assert.deepStrictEqual(describe(edges), [
+			'app/api > app/db x2',
+			'app/api/login.ts > app/api/session.ts x1',
+			'app > scripts x1',
+			'app/api > app/config.ts x1',
+		]);
+	});
+
+	test('at depth 2, ends go one level further below the folder the arrow lives in', () => {
+		const { info, state, rects } = makeApp();
+
+		const edges = visibleEdges(state, info, rects, [], 2);
+
+		assert.deepStrictEqual(describe(edges), [
+			'app/api/login.ts > app/db/users.ts x1',
+			'app/api/login.ts > app/api/session.ts x1',
+			'app/api > scripts/seed.ts x1',
+			'app/api/session.ts > app/db/users.ts x1',
+			'app/api/session.ts > app/config.ts x1',
+		]);
+	});
+
+	test('with no limit, every end attaches to the deepest visible box', () => {
+		const { info, state, rects } = makeApp();
+
+		const edges = visibleEdges(state, info, rects, []);
+
+		assert.deepStrictEqual(describe(edges), [
+			'app/api/login.ts > app/db/users.ts x1',
+			'app/api/login.ts > app/api/session.ts x1',
+			'app/api/login.ts > scripts/seed.ts x1',
+			'app/api/session.ts > app/db/users.ts x1',
+			'app/api/session.ts > app/config.ts x1',
+		]);
+	});
+
+	test('a file\'s grouped arrows still belong to it, but its neighbors\' don\'t', () => {
+		const { info, state, rects } = makeApp();
+
+		const edges = visibleEdges(state, info, rects, [], 1);
+		const lit: string[] = [];
+		for (const visible of edges) {
+			if (arrowTouches(visible, 'app/api/login.ts', info)) {
+				lit.push(visible.from + ' > ' + visible.to);
+			}
+		}
+
+		// api > config only carries session's import
+		assert.deepStrictEqual(lit, ['app/api > app/db', 'app/api/login.ts > app/api/session.ts', 'app > scripts']);
 	});
 });

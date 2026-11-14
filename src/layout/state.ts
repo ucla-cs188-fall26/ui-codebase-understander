@@ -20,7 +20,7 @@ export interface GraphInfo {
 // everything about the view that can differ from the default; deleting an entry brings the default back
 export interface LayoutState {
 	expanded: Set<string>; // open nodes; the root is always open
-	revealed: Set<string>; // parents whose +N strip was clicked to show every child
+	shownPastLimit: Set<string>; // children past the limit the user brought out of a strip
 	homes: Map<string, Position>; // each placed box's top-left, relative to the inside of its parent
 	closedSizes: Map<string, Size>; // only boxes the user has resized while closed
 	openSizes: Map<string, Size>; // only boxes the user has resized while open; others fit their children
@@ -99,7 +99,7 @@ export function childOrigin(): Position {
 export function createLayoutState(): LayoutState {
 	return {
 		expanded: new Set([ROOT_ID]),
-		revealed: new Set(),
+		shownPastLimit: new Set(),
 		homes: new Map(),
 		closedSizes: new Map(),
 		openSizes: new Map(),
@@ -107,16 +107,29 @@ export function createLayoutState(): LayoutState {
 }
 
 /**
- * Lists the children of a node that get their own box; the rest wait behind a strip.
+ * Copies the state, so a change can be tried on the copy and thrown away. Positions and sizes are shared, which is
+ * safe because nothing changes one in place; a new one is always set instead.
+ * @param state The state to copy.
+ * @returns A state with the same entries, in sets and maps of its own.
+ */
+export function copyLayoutState(state: LayoutState): LayoutState {
+	return {
+		expanded: new Set(state.expanded),
+		shownPastLimit: new Set(state.shownPastLimit),
+		homes: new Map(state.homes),
+		closedSizes: new Map(state.closedSizes),
+		openSizes: new Map(state.openSizes),
+	};
+}
+
+/**
+ * Lists the children of a node that get a box before the user brings out any more: the ones within the limit.
  * @param info The graph lookups.
  * @param parentId The node whose children we want.
  * @returns Up to CHILD_LIMIT children, most important first; at the top level, everything part of the flow plus up to
  *   CHILD_LIMIT of the rest (chosen once per graph, in buildGraphInfo).
  */
-export function shownChildren(info: GraphInfo, parentId: string, state?: LayoutState): string[] {
-	if (state?.revealed.has(parentId)) {
-		return info.childrenById.get(parentId) ?? [];
-	}
+function defaultShownChildren(info: GraphInfo, parentId: string): string[] {
 	if (parentId === ROOT_ID) {
 		return info.topLevelShown;
 	}
@@ -125,13 +138,31 @@ export function shownChildren(info: GraphInfo, parentId: string, state?: LayoutS
 }
 
 /**
- * Lists the children of a node that don't get a box, whatever the box's size: the ones past the limit.
+ * Lists the children of a node that get their own box; the rest wait behind a strip.
+ * @param state The view state.
+ * @param info The graph lookups.
+ * @param parentId The node whose children we want.
+ * @returns The children within the limit, most important first, then any past it the user brought out of a strip.
+ */
+export function shownChildren(state: LayoutState, info: GraphInfo, parentId: string): string[] {
+	// a copy, since the top level's list is shared by everything
+	const shown = defaultShownChildren(info, parentId).slice();
+	for (const id of childrenPastLimit(info, parentId)) {
+		if (state.shownPastLimit.has(id)) {
+			shown.push(id);
+		}
+	}
+	return shown;
+}
+
+/**
+ * Lists the children of a node past the limit, whether or not the user brought them out of a strip.
  * @param info The graph lookups.
  * @param parentId The node whose children we want.
  * @returns Its other children, most important first.
  */
-function childrenPastLimit(info: GraphInfo, parentId: string, state?: LayoutState): string[] {
-	const shown = new Set(shownChildren(info, parentId, state));
+function childrenPastLimit(info: GraphInfo, parentId: string): string[] {
+	const shown = new Set(defaultShownChildren(info, parentId));
 	const past: string[] = [];
 	for (const id of info.childrenById.get(parentId) ?? []) {
 		if (!shown.has(id)) {
@@ -153,10 +184,7 @@ const pastLimitSidesCache = new WeakMap<GraphInfo, Map<string, { right: string[]
  * @param parentId The node.
  * @returns The hidden children on each side, most important first.
  */
-export function pastLimitSides(info: GraphInfo, parentId: string, state?: LayoutState): { right: string[]; bottom: string[] } {
-	if (state?.revealed.has(parentId)) {
-		return { right: [], bottom: [] };
-	}
+function defaultPastLimitSides(info: GraphInfo, parentId: string): { right: string[]; bottom: string[] } {
 	let byParent = pastLimitSidesCache.get(info);
 	if (byParent === undefined) {
 		byParent = new Map();
@@ -167,7 +195,7 @@ export function pastLimitSides(info: GraphInfo, parentId: string, state?: Layout
 		return known;
 	}
 
-	const past = childrenPastLimit(info, parentId, state);
+	const past = childrenPastLimit(info, parentId);
 	const sides = { right: [] as string[], bottom: [] as string[] };
 	if (parentId === ROOT_ID) {
 		sides.bottom = past;
@@ -182,7 +210,7 @@ export function pastLimitSides(info: GraphInfo, parentId: string, state?: Layout
 
 		// the right edge of the shown children; anything starting past it would have been to their right
 		let shownRight = 0;
-		for (const id of shownChildren(info, parentId, state)) {
+		for (const id of defaultShownChildren(info, parentId)) {
 			shownRight = Math.max(shownRight, positions.get(id)!.x + sizes.get(id)!.width);
 		}
 		for (const id of past) {
@@ -196,6 +224,30 @@ export function pastLimitSides(info: GraphInfo, parentId: string, state?: Layout
 
 	byParent.set(parentId, sides);
 	return sides;
+}
+
+/**
+ * Lists the children past the limit still waiting behind each side's strip: the ones the user hasn't brought out.
+ * Each stays on the side it started on, so bringing some out never moves the rest to the other strip.
+ * @param state The view state.
+ * @param info The graph lookups.
+ * @param parentId The node.
+ * @returns The hidden children on each side, most important first.
+ */
+export function pastLimitSides(state: LayoutState, info: GraphInfo, parentId: string): { right: string[]; bottom: string[] } {
+	const sides = defaultPastLimitSides(info, parentId);
+	const waiting = { right: [] as string[], bottom: [] as string[] };
+	for (const id of sides.right) {
+		if (!state.shownPastLimit.has(id)) {
+			waiting.right.push(id);
+		}
+	}
+	for (const id of sides.bottom) {
+		if (!state.shownPastLimit.has(id)) {
+			waiting.bottom.push(id);
+		}
+	}
+	return waiting;
 }
 
 /**
@@ -230,7 +282,7 @@ export function closedSize(state: LayoutState, info: GraphInfo, id: string): Siz
  */
 export function arrangeChildren(state: LayoutState, info: GraphInfo, parentId: string): Map<string, Rect> {
 	const childIds: string[] = [];
-	for (const id of shownChildren(info, parentId, state)) {
+	for (const id of shownChildren(state, info, parentId)) {
 		if (state.homes.has(id)) {
 			childIds.push(id);
 		}
@@ -358,6 +410,22 @@ function chainInPath(siblings: Map<string, Rect>, path: { start: number; end: nu
 	return found;
 }
 
+/**
+ * Squishes a box's children sideways into its width, the first of arrangeShown's two squishes. A side with a strip
+ * gives it room; if squishing only finds out it must hide something there, it tries again with the room set aside.
+ * @param rects The children as arranged.
+ * @param insideWidth The room inside the box, from its left padding to its right padding.
+ * @param hasRightStrip True if children past the limit already wait on the right.
+ * @returns The squished children, and the ones it hid.
+ */
+function squishAcross(rects: Map<string, Rect>, insideWidth: number, hasRightStrip: boolean): { rects: Map<string, Rect>; hidden: string[]; fits: boolean } {
+	let across = squishHorizontally(rects, insideWidth - (hasRightStrip ? STRIP_ROOM : 0));
+	if (across.hidden.length > 0 && !hasRightStrip) {
+		across = squishHorizontally(rects, insideWidth - STRIP_ROOM);
+	}
+	return across;
+}
+
 // what's drawn inside a box: where its shown children go, and which children wait behind each side's strip
 export interface Arrangement {
 	rects: Map<string, Rect>; // relative to the inside of the box
@@ -377,7 +445,7 @@ export function arrangeShown(state: LayoutState, info: GraphInfo, parentId: stri
 	const rects = arrangeChildren(state, info, parentId);
 
 	// children past the limit never got a home; they wait on the side the default layout would have put them
-	const past = pastLimitSides(info, parentId, state);
+	const past = pastLimitSides(state, info, parentId);
 
 	// only a size the user chose can be too small; otherwise the box fits its children
 	const set = state.openSizes.get(parentId);
@@ -392,10 +460,7 @@ export function arrangeShown(state: LayoutState, info: GraphInfo, parentId: stri
 
 	// a side with a strip gives it room; if squishing only finds out it must hide something there, it tries again with
 	// the room set aside
-	let across = squishHorizontally(rects, insideWidth - (past.right.length > 0 ? STRIP_ROOM : 0));
-	if (across.hidden.length > 0 && past.right.length === 0) {
-		across = squishHorizontally(rects, insideWidth - STRIP_ROOM);
-	}
+	const across = squishAcross(rects, insideWidth, past.right.length > 0);
 	let down = squishVertically(across.rects, insideHeight - (past.bottom.length > 0 ? STRIP_ROOM : 0));
 	if (down.hidden.length > 0 && past.bottom.length === 0) {
 		down = squishVertically(across.rects, insideHeight - STRIP_ROOM);
@@ -419,7 +484,7 @@ function pastLimitRoom(state: LayoutState, info: GraphInfo, id: string): { right
 	if (id === ROOT_ID) {
 		return { right: 0, bottom: 0 };
 	}
-	const past = pastLimitSides(info, id, state);
+	const past = pastLimitSides(state, info, id);
 	return { right: past.right.length > 0 ? STRIP_ROOM : 0, bottom: past.bottom.length > 0 ? STRIP_ROOM : 0 };
 }
 
@@ -471,7 +536,7 @@ export function layOutChildren(state: LayoutState, info: GraphInfo, parentId: st
 	// out, like new files, or top-level files that used to be hidden
 	const placed: string[] = [];
 	const unplaced: string[] = [];
-	for (const id of shownChildren(info, parentId, state)) {
+	for (const id of shownChildren(state, info, parentId)) {
 		if (state.homes.has(id)) {
 			placed.push(id);
 		} else {
@@ -537,6 +602,7 @@ export function resetNode(state: LayoutState, info: GraphInfo, id: string): void
 				state.closedSizes.delete(nodeId);
 				state.openSizes.delete(nodeId);
 				state.expanded.delete(nodeId);
+				state.shownPastLimit.delete(nodeId);
 			}
 		}
 
@@ -632,17 +698,21 @@ function setSize(state: LayoutState, info: GraphInfo, id: string, size: Size): v
 	if (isOpen) {
 		const children = arrangeChildren(state, info, id);
 		const origin = childOrigin();
-		const smallestWidth = minSquishWidth(children);
-		const smallestHeight = minSquishHeight(children);
+		const room = pastLimitRoom(state, info, id);
 
 		// at the smallest size, a row or column longer than 3 hides boxes, which brings a strip that needs its room
+		const smallestWidth = minSquishWidth(children);
 		const hidesAcross = squishHorizontally(children, smallestWidth).hidden.length > 0;
-		const hidesDown = squishVertically(children, smallestHeight).hidden.length > 0;
-		const room = pastLimitRoom(state, info, id);
 		const rightRoom = room.right > 0 || hidesAcross ? STRIP_ROOM : 0;
-		const bottomRoom = room.bottom > 0 || hidesDown ? STRIP_ROOM : 0;
-
 		minWidth = Math.max(minWidth, origin.x + smallestWidth + PADDING + rightRoom);
+
+		// the height is measured on the children as they're drawn at the width it will have: squishing across slides
+		// them, which changes which ones share a column
+		const width = Math.max(minWidth, size.width);
+		const across = squishAcross(children, width - origin.x - PADDING, room.right > 0);
+		const smallestHeight = minSquishHeight(across.rects);
+		const hidesDown = squishVertically(across.rects, smallestHeight).hidden.length > 0;
+		const bottomRoom = room.bottom > 0 || hidesDown ? STRIP_ROOM : 0;
 		minHeight = Math.max(HEADER, origin.y + smallestHeight + PADDING + bottomRoom);
 	}
 	const clamped = { width: Math.max(minWidth, size.width), height: Math.max(minHeight, size.height) };
@@ -688,4 +758,96 @@ export function closeNode(state: LayoutState, info: GraphInfo, id: string): void
 		state.expanded.delete(id);
 	}
 	changeSize(state, info, id, close);
+}
+
+/**
+ * Gives children brought out of a strip their homes: stacked in one column, below every placed box for the bottom
+ * strip or right of them for the right strip, so they come out where they waited. A column of their own keeps them from
+ * straddling the columns already there, which would make squishing count them as one and stop it hiding any.
+ * @param state The view state. The children get homes.
+ * @param info The graph lookups.
+ * @param parentId The box they're in.
+ * @param ids The children, most important first; any that already have a home keep it.
+ * @param side The strip they came out of.
+ */
+function placeBroughtOut(state: LayoutState, info: GraphInfo, parentId: string, ids: string[], side: 'right' | 'bottom'): void {
+	// the edges of everything already placed; with nothing placed, they start at the corner
+	let left = Infinity;
+	let top = Infinity;
+	let right = 0;
+	let bottom = 0;
+	for (const rect of arrangeChildren(state, info, parentId).values()) {
+		left = Math.min(left, rect.x);
+		top = Math.min(top, rect.y);
+		right = Math.max(right, rect.x + rect.width);
+		bottom = Math.max(bottom, rect.y + rect.height);
+	}
+	if (left === Infinity) {
+		left = 0;
+		top = 0;
+	}
+
+	let x = left;
+	let y = bottom + GAP;
+	if (side === 'right') {
+		x = right + GAP;
+		y = top;
+	}
+	for (const id of ids) {
+		if (state.homes.has(id)) {
+			continue;
+		}
+		state.homes.set(id, { x: x, y: y });
+		y += boxSize(state, info, id).height + GAP;
+	}
+}
+
+/**
+ * Shows more of what a strip hides, the way clicking it does. If the user made the box too small for the children it
+ * already shows on that side, it first grows back to fit them; otherwise the next CHILD_LIMIT children waiting on that
+ * side get boxes, in a column on that side of the ones already there.
+ * @param state The view state.
+ * @param info The graph lookups.
+ * @param id The box the strip belongs to, or the root for the strip below the top-level boxes.
+ * @param side Which of the box's strips was clicked.
+ */
+export function showMoreFromStrip(state: LayoutState, info: GraphInfo, id: string, side: 'right' | 'bottom'): void {
+	function showMore(): void {
+		// a strip holds the boxes a squish hid as well as the ones past the limit
+		const shown = arrangeShown(state, info, id);
+		const past = pastLimitSides(state, info, id);
+		let squishedHidden: number;
+		let waiting: string[];
+		if (side === 'right') {
+			squishedHidden = shown.hiddenRight.length - past.right.length;
+			waiting = past.right;
+		} else {
+			squishedHidden = shown.hiddenBottom.length - past.bottom.length;
+			waiting = past.bottom;
+		}
+
+		// the size the user chose is too small for what's already shown, so the box goes back to fitting it
+		if (squishedHidden > 0) {
+			state.openSizes.delete(id);
+			return;
+		}
+
+		const brought = waiting.slice(0, CHILD_LIMIT);
+		for (const childId of brought) {
+			state.shownPastLimit.add(childId);
+		}
+		placeBroughtOut(state, info, id, brought, side);
+
+		// they go below the boxes already there, which may be past the edge of a size the user chose
+		for (const childId of brought) {
+			growToFit(state, info, childId);
+		}
+	}
+
+	// the root is the whole page, so nothing around it needs room
+	if (id === ROOT_ID) {
+		showMore();
+	} else {
+		changeSize(state, info, id, showMore);
+	}
 }

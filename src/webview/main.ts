@@ -2,14 +2,14 @@ import { Edge, Node, NodeKind, ROOT_ID } from '../graph/types';
 import { ExtensionToWebview, FlowGraphMessage, FlowScenario, ModelOption, WebviewToExtension } from '../messages';
 import { connections, isInside } from '../analysis/edges';
 import { getLineage, groupByParent } from '../analysis/lookups';
-import { Arrow, arrowPath, placeArrows } from '../layout/arrows';
+import { Arrow, arrowHead, arrowPath, arrowWidth, placeArrows } from '../layout/arrows';
 import { Camera, fitCamera, zoomAt } from '../layout/camera';
 import { boundsOf, Position, Rect, Size } from '../layout/geometry';
-import { arrangeShown, boxSize, buildGraphInfo, closeNode, createLayoutState, GraphInfo, layOutChildren, LayoutState, openNode, resetNode, resizeTo } from '../layout/state';
-import { fromSaved, toSaved } from '../layout/saved';
-import { dropAt } from '../layout/drop';
-import { makeCloseIcon, makeFitIcon, makeGripIcon, makeOpenIcon, makeResetIcon, makeResizeIcon, SVG_NS } from './icons';
-import { boxZIndexes, nodeOfEnd, placeBoxes, placeStrips, Strip, visibleEdges, visibleEndpointOf } from '../layout/place';
+import { arrangeShown, boxSize, buildGraphInfo, closeNode, copyLayoutState, createLayoutState, GraphInfo, layOutChildren, LayoutState, openNode, resetNode, resizeTo, showMoreFromStrip } from '../layout/state';
+import { ArrowMode, fromSaved, toSaved } from '../layout/saved';
+import { dragTo, dropAt } from '../layout/drop';
+import { makeArrowsIcon, makeCloseIcon, makeFitIcon, makeGripIcon, makeOpenIcon, makeResetIcon, makeResizeIcon, makeSettingsIcon, SVG_NS } from './icons';
+import { arrowEndsOf, arrowTouches, arrowZIndex, boxesUnderArrow, boxZIndexes, nodeOfEnd, placeBoxes, placeStrips, Strip, VisibleEdge, visibleEdges } from '../layout/place';
 
 // VS Code provides this once per webview; calling it a second time throws
 declare function acquireVsCodeApi(): { postMessage(message: WebviewToExtension): void };
@@ -54,47 +54,42 @@ function makeBox(label: string, kind: string, x: number, y: number, width: numbe
 }
 
 /**
- * Makes the arrowhead shape every arrow points with. Arrows anywhere on the page can use it as url(#arrowhead).
- * @returns An invisible svg element holding the shape.
+ * Checks whether an edge is the one the sidebar is showing.
+ * @param edge A visible edge.
+ * @returns True if it's the selected arrow's edge.
  */
-function makeArrowheadDefs(): SVGSVGElement {
-	const svg = document.createElementNS(SVG_NS, 'svg');
-	svg.id = 'arrowheads';
-
-	const defs = document.createElementNS(SVG_NS, 'defs');
-	const marker = document.createElementNS(SVG_NS, 'marker');
-	marker.id = 'arrowhead';
-	marker.setAttribute('viewBox', '0 0 10 10');
-	marker.setAttribute('refX', '10'); // the triangle's tip sits on the arrow's end
-	marker.setAttribute('refY', '5');
-	marker.setAttribute('markerWidth', '6');
-	marker.setAttribute('markerHeight', '6');
-	marker.setAttribute('orient', 'auto'); // turn to follow the curve's direction
-	const triangle = document.createElementNS(SVG_NS, 'path');
-	triangle.setAttribute('d', 'M 0 0 L 10 5 L 0 10 Z');
-	marker.appendChild(triangle);
-	defs.appendChild(marker);
-	svg.appendChild(defs);
-
-	return svg;
+function isSelectedEdge(edge: Edge): boolean {
+	return selectedEdge !== undefined && selectedEdge.from === edge.from && selectedEdge.to === edge.to;
 }
 
 /**
  * Makes one arrow, in its own svg so it can paint at its own depth among the boxes.
  * @param arrow The arrow, from placeArrows, in page coordinates.
- * @param zIndex How high it paints above the graph boxes.
+ * @param edge The edge it draws, so clicking it can select it, with how many of the graph's edges it stands for.
+ * @param zIndex How high it paints, from arrowZIndex.
+ * @param under The boxes it passes under, from boxesUnderArrow, in page coordinates; it's cut out where it crosses them.
+ * @param faint True to draw it faintly, for an arrow that isn't the selected box's in the default arrow setting.
  * @returns The svg element holding the arrow.
  */
-function makeArrow(arrow: Arrow, edge: Edge, zIndex: number): SVGSVGElement {
+function makeArrow(arrow: Arrow, edge: VisibleEdge, zIndex: number, under: Rect[], faint: boolean): SVGSVGElement {
 	const svg = document.createElementNS(SVG_NS, 'svg');
 	svg.classList.add('arrow');
-	if (selectedEdge !== undefined && selectedEdge.from === edge.from && selectedEdge.to === edge.to) {
+
+	// thicker the more imports it stands for; the page's styles read this. Its head grows with it
+	const lineWidth = arrowWidth(edge.count);
+	const head = arrowHead(arrow, lineWidth);
+	svg.style.setProperty('--arrow-width', lineWidth + 'px');
+	if (isSelectedEdge(edge)) {
 		svg.classList.add('selected');
+	}
+	if (faint) {
+		svg.classList.add('faint');
 	}
 	svg.style.zIndex = String(zIndex);
 	// The SVG needs a viewport around the whole curve; otherwise only the portion in its default 300x150 box
 	// receives pointer events, even though overflow lets the rest of the curve remain visible.
-	const pull = Math.max(30, Math.hypot(arrow.end.x - arrow.start.x, arrow.end.y - arrow.start.y) / 2) + 4;
+	// The extra 6 is half the click target's width, so its edges aren't cut off.
+	const pull = Math.max(30, Math.hypot(arrow.end.x - arrow.start.x, arrow.end.y - arrow.start.y) / 2) + 6;
 	const left = Math.min(arrow.start.x, arrow.end.x) - pull;
 	const top = Math.min(arrow.start.y, arrow.end.y) - pull;
 	const width = Math.abs(arrow.end.x - arrow.start.x) + pull * 2;
@@ -105,26 +100,126 @@ function makeArrow(arrow: Arrow, edge: Edge, zIndex: number): SVGSVGElement {
 	svg.style.left = left + 'px';
 	svg.style.top = top + 'px';
 
-	const path = document.createElementNS(SVG_NS, 'path');
-	path.setAttribute('d', arrowPath(arrow));
-	path.setAttribute('marker-end', 'url(#arrowhead)');
-	path.addEventListener('click', (event) => {
+	// it shows everywhere except over the boxes it passes under: its whole area, with a hole cut for each of them.
+	// The clip also lets clicks there through to the box
+	const arrowNumber = nextArrowId;
+	nextArrowId++;
+	const clipId = 'arrow-clip-' + arrowNumber;
+	const defs = document.createElementNS(SVG_NS, 'defs');
+	const clip = document.createElementNS(SVG_NS, 'clipPath');
+	clip.id = clipId;
+	const shape = document.createElementNS(SVG_NS, 'path');
+	let d = rectPath({ x: left, y: top, width: width, height: height });
+	for (const rect of under) {
+		d += ' ' + rectPath(rect);
+	}
+	shape.setAttribute('d', d);
+	shape.setAttribute('clip-rule', 'evenodd'); // each rect inside the first is a hole
+	clip.appendChild(shape);
+	defs.appendChild(clip);
+
+	// near those boxes it fades out first: a mask that shows everything, darkening in bands toward each box. Bands
+	// overlap, so each one further in is darker. The clip still does the exact cut, and decides where clicks land
+	const fadeId = 'arrow-fade-' + arrowNumber;
+	const fade = document.createElementNS(SVG_NS, 'mask');
+	fade.id = fadeId;
+	fade.setAttribute('maskUnits', 'userSpaceOnUse');
+	fade.setAttribute('x', String(left));
+	fade.setAttribute('y', String(top));
+	fade.setAttribute('width', String(width));
+	fade.setAttribute('height', String(height));
+	fade.appendChild(makeMaskRect({ x: left, y: top, width: width, height: height }, 0, 'white', 1));
+	for (const rect of under) {
+		for (let band = FADE_BANDS; band >= 1; band--) {
+			fade.appendChild(makeMaskRect(rect, band * FADE_STEP, 'black', FADE_DARKEN));
+		}
+	}
+	defs.appendChild(fade);
+	svg.appendChild(defs);
+
+	const group = document.createElementNS(SVG_NS, 'g');
+	group.setAttribute('clip-path', 'url(#' + clipId + ')');
+	group.setAttribute('mask', 'url(#' + fadeId + ')');
+	svg.appendChild(group);
+
+	const line = document.createElementNS(SVG_NS, 'path');
+	line.classList.add('arrow-line');
+	// the line stops at the head's base, 1px inside it so no gap shows, so a thick line can't show past the tip
+	line.setAttribute('d', arrowPath(arrow, head.length - 1));
+	group.appendChild(line);
+
+	const headShape = document.createElementNS(SVG_NS, 'path');
+	headShape.classList.add('arrow-head');
+	headShape.setAttribute('d', head.path);
+	group.appendChild(headShape);
+
+	// a wide, invisible copy of the line on top of it, so a thin arrow is still easy to click
+	const hit = document.createElementNS(SVG_NS, 'path');
+	hit.classList.add('arrow-hit');
+	hit.setAttribute('d', arrowPath(arrow));
+	function select(event: MouseEvent): void {
 		event.stopPropagation();
 		selectedEdge = edge;
 		selectedId = undefined;
 		drawGraph();
-	});
-	svg.appendChild(path);
+	}
+	hit.addEventListener('click', select);
+
+	// how many imports it stands for, on hover
+	const title = document.createElementNS(SVG_NS, 'title');
+	title.textContent = edge.count === 1 ? '1 import' : edge.count + ' imports';
+	hit.appendChild(title);
+	group.appendChild(hit);
 
 	return svg;
 }
 
+// numbers each arrow's clip and fade shapes, so their ids don't clash; reset on every redraw
+let nextArrowId = 0;
+
+// near a box it passes under, an arrow fades out over this many bands, each this wide, each this much darker, so it
+// doesn't look like it starts or ends at that box
+const FADE_BANDS = 4;
+const FADE_STEP = 4;
+const FADE_DARKEN = 0.3;
+
 /**
- * While dragging, checks whether an arrow ends somewhere the dragged box is covering, so it would point at
- * something hidden. An arrow on the uncovered side of a partly covered box is fine.
+ * Makes one rectangle of an arrow's fade mask: a box grown on every side, with its corners rounded to match.
+ * @param rect The box, in page coordinates.
+ * @param grow How far to grow it on each side.
+ * @param color 'white' to show the arrow there, 'black' to hide it.
+ * @param opacity How strongly it shows or hides.
+ * @returns The svg rect.
+ */
+function makeMaskRect(rect: Rect, grow: number, color: string, opacity: number): SVGRectElement {
+	const shape = document.createElementNS(SVG_NS, 'rect');
+	shape.setAttribute('x', String(rect.x - grow));
+	shape.setAttribute('y', String(rect.y - grow));
+	shape.setAttribute('width', String(rect.width + grow * 2));
+	shape.setAttribute('height', String(rect.height + grow * 2));
+	shape.setAttribute('rx', String(8 + grow)); // boxes have 8px corners
+	shape.setAttribute('fill', color);
+	shape.setAttribute('fill-opacity', String(opacity));
+	return shape;
+}
+
+/**
+ * Writes a rectangle as svg path data.
+ * @param rect The rectangle.
+ * @returns A closed path around it.
+ */
+function rectPath(rect: Rect): string {
+	return 'M ' + rect.x + ' ' + rect.y + ' h ' + rect.width + ' v ' + rect.height + ' h ' + (-rect.width) + ' Z';
+}
+
+/**
+ * While dragging, checks whether one of the dragged box's own arrows has its other end under the box, so it would be
+ * a stub pointing back into the box it comes from. Arrows between other boxes are always drawn; where they end under
+ * the dragged box, they pass beneath it, since it paints on top.
  * @param arrow The placed arrow.
  * @param rects Every box's rect, with the dragged box already moved by the drag.
- * @returns True if either end is under the dragged box but not part of it; always false when nothing is dragged.
+ * @returns True if one end is the dragged box (or inside it) and the other is under it; always false when nothing is
+ *   dragged.
  */
 function endsUnderDraggedBox(arrow: Arrow, rects: Map<string, Rect>): boolean {
 	if (!isDragging || drag === undefined || info === undefined) {
@@ -138,8 +233,16 @@ function endsUnderDraggedBox(arrow: Arrow, rects: Map<string, Rect>): boolean {
 
 	// an end that belongs to the dragged box (or something in it, strips included) moves with it, so it's never
 	// hidden by it
-	const startHidden = !isInside(nodeOfEnd(arrow.from), drag.id, info.nodesById) && isUnderDraggedBox(arrow.start);
-	const endHidden = !isInside(nodeOfEnd(arrow.to), drag.id, info.nodesById) && isUnderDraggedBox(arrow.end);
+	const fromDragged = isInside(nodeOfEnd(arrow.from), drag.id, info.nodesById);
+	const toDragged = isInside(nodeOfEnd(arrow.to), drag.id, info.nodesById);
+
+	// only the dragged box's own arrows to the outside can turn into stubs; arrows between other boxes pass under it,
+	// and arrows inside it move with it
+	if (fromDragged === toDragged) {
+		return false;
+	}
+	const startHidden = !fromDragged && isUnderDraggedBox(arrow.start);
+	const endHidden = !toDragged && isUnderDraggedBox(arrow.end);
 	return startHidden || endHidden;
 }
 
@@ -153,6 +256,7 @@ function makeStrip(strip: Strip, zIndex: number): HTMLElement {
 	const element = document.createElement('div');
 	element.className = 'strip strip-' + strip.side;
 	element.dataset.ownerId = strip.ownerId;
+	element.dataset.side = strip.side;
 	element.style.left = strip.rect.x + 'px';
 	element.style.top = strip.rect.y + 'px';
 	element.style.width = strip.rect.width + 'px';
@@ -179,15 +283,6 @@ function drawGraph(): void {
 	}
 
 	const rects = placeBoxes(state, info, { x: START_X, y: START_Y });
-
-	// while dragging, draw the box and everything inside it moved by the drag so far; its home hasn't changed yet
-	if (isDragging && drag !== undefined) {
-		for (const [id, rect] of rects) {
-			if (isInside(id, drag.id, info.nodesById)) {
-				rects.set(id, { x: rect.x + dragOffset.x, y: rect.y + dragOffset.y, width: rect.width, height: rect.height });
-			}
-		}
-	}
 	lastRects = rects;
 
 	const world = document.getElementById('world')!;
@@ -204,7 +299,6 @@ function drawGraph(): void {
 			}
 		}
 	}
-	world.appendChild(makeArrowheadDefs());
 
 	// strips stand in for hidden children; arrows to those end at the strip, so it goes in with the box rects
 	const strips = placeStrips(state, info, rects);
@@ -214,17 +308,30 @@ function drawGraph(): void {
 		world.appendChild(makeStrip(strip, (boxZ.get(strip.ownerId) ?? 0) + 1));
 	}
 
-	const edges = visibleEdges(state, info, rects, strips);
+	const edges = visibleEdges(state, info, rects, strips, arrowDepth);
 	const arrows = placeArrows(edges, arrowRects);
-	const topGraphZ = Math.max(0, ...boxZ.values()) + 1;
+
+	nextArrowId = 0;
 	for (let i = 0; i < arrows.length; i++) {
-		// while dragging, an arrow ending under the dragged box would point at something hidden
+		// while dragging, the dragged box's own arrow to something under it would be a stub pointing back into it
 		if (endsUnderDraggedBox(arrows[i], rects)) {
 			continue;
 		}
 
 		// placeArrows keeps the edges' order, so arrows[i] belongs to edges[i]
-		world.appendChild(makeArrow(arrows[i], edges[i], topGraphZ));
+
+		// the selected box's arrows, and a selected arrow, always draw in full; the rest go by the toolbar setting
+		const lit = isSelectedEdge(edges[i]) || (selectedId !== undefined && arrowTouches(edges[i], selectedId, info));
+		if (!lit && arrowMode === 'hidden') {
+			continue;
+		}
+		const faint = !lit && arrowMode === 'default';
+
+		const under: Rect[] = [];
+		for (const id of boxesUnderArrow(edges[i], info, rects)) {
+			under.push(rects.get(id)!);
+		}
+		world.appendChild(makeArrow(arrows[i], edges[i], arrowZIndex(edges[i], state, info, boxZ), under, faint));
 	}
 
 	for (const [id, rect] of rects) {
@@ -304,7 +411,6 @@ function drawFlowGraph(view: FlowGraphMessage): void {
 
 	const world = document.getElementById('world')!;
 	world.replaceChildren();
-	world.appendChild(makeArrowheadDefs());
 	const rects = new Map<string, Rect>();
 	const actions = new Map(view.flow.steps.map((step) => [step.nodeId, step.action]));
 	const boxWidth = 280;
@@ -316,7 +422,9 @@ function drawFlowGraph(view: FlowGraphMessage): void {
 	});
 	const arrows = placeArrows(view.graph.edges, rects);
 	for (let i = 0; i < arrows.length; i++) {
-		world.appendChild(makeArrow(arrows[i], view.graph.edges[i], 1));
+		// the flow's boxes sit in one row, so no arrow passes under any
+		const flowEdge = view.graph.edges[i];
+		world.appendChild(makeArrow(arrows[i], { from: flowEdge.from, to: flowEdge.to, kind: flowEdge.kind, count: 1, edges: [flowEdge] }, 1, [], false));
 	}
 	view.graph.nodes.forEach((node: Node, index) => {
 		const rect = rects.get(node.id)!;
@@ -445,10 +553,11 @@ function drawEdgeSidebar(sidebar: HTMLElement, selected: Edge): void {
 
 	const rects = placeBoxes(state, info!, { x: START_X, y: START_Y });
 	const strips = placeStrips(state, info!, rects);
-	const represented = info!.edges.filter((edge) =>
-		visibleEndpointOf(edge.from, state, info!, rects, strips) === selected.from
-		&& visibleEndpointOf(edge.to, state, info!, rects, strips) === selected.to,
-	);
+	// grouped the same way the arrows are drawn, so a merged arrow lists every import it stands for
+	const represented = info!.edges.filter((edge) => {
+		const ends = arrowEndsOf(edge, state, info!, rects, strips, arrowDepth);
+		return ends !== undefined && ends.from === selected.from && ends.to === selected.to;
+	});
 	for (const edge of represented) {
 		const from = info!.nodesById.get(edge.from)!;
 		const to = info!.nodesById.get(edge.to)!;
@@ -756,11 +865,285 @@ function isOnOverlay(event: Event): boolean {
 		|| path.includes(document.getElementById('flow-description')!);
 }
 
+// how strongly arrows draw, from the arrow settings; saved with the layout
+let arrowMode: ArrowMode = 'default';
+
+// how many levels below the folder an arrow lives in its ends may go, from the arrow settings; saved with the layout
+let arrowDepth = 1;
+
+// the arrow settings' strengths, in order, with their button names and what each does, shown on hover
+const ARROW_MODES: { mode: ArrowMode; name: string; title: string }[] = [
+	{ mode: 'hidden', name: 'Hidden', title: 'Only the selected box\'s arrows' },
+	{ mode: 'default', name: 'Default', title: 'Faint, except the selected box\'s arrows' },
+	{ mode: 'full', name: 'Full', title: 'Every arrow in full' },
+];
+
 /**
- * Fills in the toolbar in the top-left corner. Runs once, since its buttons never change.
+ * Makes a thin line between groups of toolbar controls.
+ * @returns The element.
+ */
+function makeDivider(): HTMLElement {
+	const divider = document.createElement('span');
+	divider.className = 'toolbar-divider';
+	return divider;
+}
+
+/**
+ * Shows the current arrow strength in the arrow settings: its button pressed, the others not.
+ */
+function showArrowMode(): void {
+	for (const button of document.querySelectorAll<HTMLElement>('.arrow-mode')) {
+		button.setAttribute('aria-pressed', String(button.dataset.mode === arrowMode));
+	}
+}
+
+/**
+ * Switches to the clicked arrow strength, then redraws, which also saves it.
+ * @param event The browser's mouse event, on one of the strength buttons.
+ */
+function handleArrowModeClick(event: MouseEvent): void {
+	const button = event.currentTarget as HTMLElement;
+	arrowMode = button.dataset.mode as ArrowMode;
+	showArrowMode();
+	drawGraph();
+}
+
+/**
+ * Finds the graph's deepest level, where top-level boxes are 1. At that depth arrows group nothing.
+ * @returns The deepest node's depth, or 1 before a graph arrives.
+ */
+function deepestLevel(): number {
+	// a lineage runs from the node up to the root, so it's one longer than the depth
+	let deepest = 1;
+	if (info !== undefined) {
+		for (const id of info.nodesById.keys()) {
+			deepest = Math.max(deepest, getLineage(id, info.nodesById).length - 1);
+		}
+	}
+	return deepest;
+}
+
+/**
+ * Sets up the toolbar's depth field for the current graph: its max, the dimmed "/ max" beside it, and the current
+ * setting, pulled down to the max if the repo has got shallower.
+ */
+function showArrowDepth(): void {
+	const deepest = deepestLevel();
+	arrowDepth = Math.min(arrowDepth, deepest);
+
+	const input = document.getElementById('arrow-depth') as HTMLInputElement;
+	input.max = String(deepest);
+	input.value = String(arrowDepth);
+	document.getElementById('arrow-depth-max')!.textContent = '/ ' + deepest;
+}
+
+/**
+ * Takes the depth typed or stepped to in the toolbar's field, once it's committed: rounded, at least 1 (also for
+ * anything that isn't a number), and at most the deepest level. Shows the corrected value, then redraws, which also
+ * saves it.
+ * @param event The browser's change event, on the field.
+ */
+function handleArrowDepthChange(event: Event): void {
+	const input = event.currentTarget as HTMLInputElement;
+	let depth = Math.round(Number(input.value));
+	if (Number.isNaN(depth) || depth < 1) {
+		depth = 1;
+	}
+	depth = Math.min(depth, deepestLevel());
+
+	arrowDepth = depth;
+	input.value = String(depth);
+	drawGraph();
+}
+
+/**
+ * Opens one of the toolbar's popups, or closes it if it's open. Only one is open at a time.
+ * @param id The popup's id.
+ */
+function togglePopup(id: string): void {
+	const popup = document.getElementById(id)!;
+	const wasOpen = popup.classList.contains('visible');
+	closePopups();
+	if (!wasOpen) {
+		popup.classList.add('visible');
+	}
+}
+
+/**
+ * Closes every toolbar popup.
+ */
+function closePopups(): void {
+	for (const popup of document.querySelectorAll('.popup')) {
+		popup.classList.remove('visible');
+	}
+}
+
+/**
+ * Opens the arrow settings, or closes them if they're open.
+ */
+function toggleArrowsPopup(): void {
+	togglePopup('arrows-popup');
+}
+
+/**
+ * Opens the settings popup, or closes it if it's open.
+ */
+function toggleSettings(): void {
+	togglePopup('settings');
+}
+
+/**
+ * Closes the toolbar's popups on a press anywhere outside the toolbar, which holds them.
+ * @param event The browser's pointer event.
+ */
+function closePopupsOutside(event: PointerEvent): void {
+	if (!event.composedPath().includes(document.getElementById('toolbar')!)) {
+		closePopups();
+	}
+}
+
+/**
+ * Closes the toolbar's popups on Escape.
+ * @param event The browser's keyboard event.
+ */
+function closePopupsOnEscape(event: KeyboardEvent): void {
+	if (event.key === 'Escape') {
+		closePopups();
+	}
+}
+
+/**
+ * Makes a heading at the top of a toolbar popup.
+ * @param text The heading.
+ * @returns The element.
+ */
+function makePopupHeading(text: string): HTMLElement {
+	const heading = document.createElement('div');
+	heading.className = 'popup-heading';
+	heading.textContent = text;
+	return heading;
+}
+
+/**
+ * Makes one row of a toolbar popup: a label, then a place for its control.
+ * @param label The label.
+ * @param title What the setting does, shown on hovering the label; empty for none.
+ * @returns The row, and the element to put the control in.
+ */
+function makePopupRow(label: string, title: string): { row: HTMLElement; control: HTMLElement } {
+	const row = document.createElement('div');
+	row.className = 'popup-row';
+	const name = document.createElement('span');
+	name.textContent = label;
+	name.title = title;
+	row.appendChild(name);
+	const control = document.createElement('div');
+	control.className = 'popup-control';
+	row.appendChild(control);
+	return { row: row, control: control };
+}
+
+/**
+ * Fills in the toolbar in the top-left corner, all icons: reset and fit, then the arrow settings, then a settings
+ * button at the end whose popup holds setup that's rarely changed, like the language model. Runs once, since its
+ * buttons never change.
  */
 function drawToolbar(): void {
 	const toolbar = document.getElementById('toolbar')!;
+
+	const reset = document.createElement('button');
+	reset.className = 'icon-button';
+	reset.title = 'Reset layout';
+	reset.appendChild(makeResetIcon());
+	reset.addEventListener('click', handleToolbarReset);
+	toolbar.appendChild(reset);
+
+	const fit = document.createElement('button');
+	fit.className = 'icon-button';
+	fit.title = 'Fit to view';
+	fit.appendChild(makeFitIcon());
+	fit.addEventListener('click', fitToView);
+	toolbar.appendChild(fit);
+
+	// the arrow settings, behind one button: how strongly they draw, and how deep they go
+	toolbar.appendChild(makeDivider());
+	const arrowsAnchor = document.createElement('span');
+	arrowsAnchor.className = 'popup-anchor';
+	toolbar.appendChild(arrowsAnchor);
+	const arrowsButton = document.createElement('button');
+	arrowsButton.className = 'icon-button';
+	arrowsButton.title = 'Arrows';
+	arrowsButton.appendChild(makeArrowsIcon());
+	arrowsButton.addEventListener('click', toggleArrowsPopup);
+	arrowsAnchor.appendChild(arrowsButton);
+
+	const arrows = document.createElement('div');
+	arrows.id = 'arrows-popup';
+	arrows.className = 'popup';
+	arrowsAnchor.appendChild(arrows);
+	arrows.appendChild(makePopupHeading('Arrows'));
+
+	// how strongly arrows draw: one button per strength, the current one pressed
+	const show = makePopupRow('Show', '');
+	arrows.appendChild(show.row);
+	for (const option of ARROW_MODES) {
+		const button = document.createElement('button');
+		button.className = 'text-button arrow-mode';
+		button.dataset.mode = option.mode;
+		button.textContent = option.name;
+		button.title = option.title;
+		button.addEventListener('click', handleArrowModeClick);
+		show.control.appendChild(button);
+	}
+	showArrowMode();
+
+	// how deep arrows go below the folder each lives in; typed or stepped, from 1 up to the deepest level, which is set
+	// once a graph arrives
+	const depthTitle = 'Levels below each arrow\'s folder before it groups';
+	const depth = makePopupRow('Depth', depthTitle);
+	arrows.appendChild(depth.row);
+	const depthInput = document.createElement('input');
+	depthInput.id = 'arrow-depth';
+	depthInput.type = 'number';
+	depthInput.min = '1';
+	depthInput.step = '1';
+	depthInput.setAttribute('aria-label', 'Arrow depth');
+	depthInput.title = depthTitle;
+	depthInput.addEventListener('change', handleArrowDepthChange);
+	depth.control.appendChild(depthInput);
+
+	// the deepest level, dimmed beside the field
+	const depthMax = document.createElement('span');
+	depthMax.id = 'arrow-depth-max';
+	depth.control.appendChild(depthMax);
+	showArrowDepth();
+
+	// the settings button, last, with its popup hanging below it
+	toolbar.appendChild(makeDivider());
+	const settingsAnchor = document.createElement('span');
+	settingsAnchor.className = 'popup-anchor';
+	toolbar.appendChild(settingsAnchor);
+	const settingsButton = document.createElement('button');
+	settingsButton.className = 'icon-button';
+	settingsButton.title = 'Settings';
+	settingsButton.appendChild(makeSettingsIcon());
+	settingsButton.addEventListener('click', toggleSettings);
+	settingsAnchor.appendChild(settingsButton);
+
+	const settings = document.createElement('div');
+	settings.id = 'settings';
+	settings.className = 'popup';
+	settingsAnchor.appendChild(settings);
+	document.addEventListener('pointerdown', closePopupsOutside);
+	document.addEventListener('keydown', closePopupsOnEscape);
+
+	settings.appendChild(makePopupHeading('Language model'));
+	const modelRow = document.createElement('div');
+	modelRow.className = 'settings-row';
+	settings.appendChild(modelRow);
+	const flowRow = document.createElement('div');
+	flowRow.className = 'settings-row';
+	settings.appendChild(flowRow);
 
 	const modelSelect = document.createElement('select');
 	modelSelect.id = 'model-select';
@@ -777,7 +1160,7 @@ function drawToolbar(): void {
 		(document.getElementById('generate-flows') as HTMLButtonElement).disabled = !modelIsAvailable;
 		vscode.postMessage({ type: 'selectModel', model: model });
 	});
-	toolbar.appendChild(modelSelect);
+	modelRow.appendChild(modelSelect);
 
 	const findModels = document.createElement('button');
 	findModels.className = 'text-button';
@@ -790,12 +1173,12 @@ function drawToolbar(): void {
 		modelStatus.textContent = '';
 		vscode.postMessage({ type: 'discoverModels' });
 	});
-	toolbar.appendChild(findModels);
+	modelRow.appendChild(findModels);
 
 	modelStatus = document.createElement('span');
 	modelStatus.id = 'model-status';
 	modelStatus.setAttribute('role', 'status');
-	toolbar.appendChild(modelStatus);
+	settings.insertBefore(modelStatus, flowRow);
 
 	const generate = document.createElement('button');
 	generate.className = 'text-button';
@@ -810,21 +1193,7 @@ function drawToolbar(): void {
 		showFlowResults([], 'Analyzing repository with the selected model…', true);
 		vscode.postMessage({ type: 'generateFlows', model: selected });
 	});
-	toolbar.appendChild(generate);
-
-	const reset = document.createElement('button');
-	reset.className = 'icon-button';
-	reset.title = 'Reset layout';
-	reset.appendChild(makeResetIcon());
-	reset.addEventListener('click', handleToolbarReset);
-	toolbar.appendChild(reset);
-
-	const fit = document.createElement('button');
-	fit.className = 'icon-button';
-	fit.title = 'Fit to view';
-	fit.appendChild(makeFitIcon());
-	fit.addEventListener('click', fitToView);
-	toolbar.appendChild(fit);
+	flowRow.appendChild(generate);
 }
 
 let availableModels: ModelOption[] = [];
@@ -968,7 +1337,7 @@ function saveLayout(): void {
 	if (info === undefined) {
 		return;
 	}
-	vscode.postMessage({ type: 'saveLayout', layout: toSaved(state, camera) });
+	vscode.postMessage({ type: 'saveLayout', layout: toSaved(state, camera, arrowMode, arrowDepth) });
 }
 
 /**
@@ -1039,7 +1408,7 @@ function handlePointerDown(event: PointerEvent): void {
 		// squished; the drop works from this, so the box lands where it was let go
 		const parentId = info!.nodesById.get(selectedId)!.parent!;
 		const drawn = arrangeShown(state, info!, parentId).rects.get(selectedId)!;
-		drag = { id: selectedId, startDrawn: { x: drawn.x, y: drawn.y }, startMouse: pressStart };
+		drag = { id: selectedId, startDrawn: { x: drawn.x, y: drawn.y }, startMouse: pressStart, startState: copyLayoutState(state) };
 		return;
 	}
 
@@ -1103,10 +1472,11 @@ function handlePointerUp(): void {
 		isDragging = false;
 		document.body.classList.remove('dragging');
 
-		// now the home moves, once; then what it landed on is pushed out of the way, and a redraw in the normal paint
-		// order also saves
+		// the drop, from where things were before the drag, so it's the same as dropping there in one go: what it
+		// landed on is pushed out of the way, and a redraw in the normal paint order also saves
 		if (wasDragging && info !== undefined) {
 			const target = { x: dropped.startDrawn.x + dragOffset.x, y: dropped.startDrawn.y + dragOffset.y };
+			state = copyLayoutState(dropped.startState);
 			dropAt(state, info, dropped.id, target);
 			drawGraph();
 		}
@@ -1156,11 +1526,11 @@ function endResize(): void {
 	document.body.classList.remove('resizing');
 }
 
-// the box being moved, where it was drawn among its siblings and where the mouse was when the press started;
-// undefined when no box is pressed
-let drag: { id: string; startDrawn: Position; startMouse: Position } | undefined = undefined;
+// the box being moved, where it was drawn among its siblings, where the mouse was when the press started, and the
+// state from then, which every step of the drag starts over from; undefined when no box is pressed
+let drag: { id: string; startDrawn: Position; startMouse: Position; startState: LayoutState } | undefined = undefined;
 
-// how far the dragged box has been moved so far, in world pixels; only drawn until the drop
+// how far the dragged box has been moved so far, in world pixels
 let dragOffset: Position = { x: 0, y: 0 };
 
 // whether that press has moved far enough to really be dragging, rather than a click
@@ -1200,8 +1570,12 @@ function moveDraggedBox(event: PointerEvent): void {
 		offsetY = Math.max(offsetY, -drag.startDrawn.y);
 	}
 
-	// only the drawing moves; the home changes once, on drop, so nothing else shifts while dragging
+	// the home moves and the directory grows to hold it, starting over from before the drag each time, so a long
+	// drag can't build up drift; nothing is pushed until the drop
 	dragOffset = { x: offsetX, y: offsetY };
+	const target = { x: drag.startDrawn.x + offsetX, y: drag.startDrawn.y + offsetY };
+	state = copyLayoutState(drag.startState);
+	dragTo(state, info, drag.id, target);
 	drawGraph();
 }
 
@@ -1236,8 +1610,8 @@ function handleClick(event: MouseEvent): void {
 	if (strip !== null && info !== undefined) {
 		selectedEdge = undefined;
 		const ownerId = strip.dataset.ownerId!;
-		state.revealed.add(ownerId);
-		layOutChildren(state, info, ownerId);
+		const side = strip.dataset.side as 'right' | 'bottom';
+		showMoreFromStrip(state, info, ownerId, side);
 		drawGraph();
 		return;
 	}
@@ -1291,9 +1665,13 @@ function handleMessage(event: MessageEvent<ExtensionToWebview>): void {
 			const restored = fromSaved(event.data.layout, info);
 			state = restored.state;
 			camera = restored.camera;
+			arrowMode = restored.arrowMode;
+			arrowDepth = restored.arrowDepth;
+			showArrowMode();
 		} else {
 			state = createLayoutState();
 		}
+		showArrowDepth();
 
 		// give homes to anything new since the save; boxes already placed keep theirs
 		for (const id of state.expanded) {

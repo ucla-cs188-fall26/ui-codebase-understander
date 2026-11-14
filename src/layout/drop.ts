@@ -159,3 +159,19 @@ export function dropAt(state: LayoutState, info: GraphInfo, id: string, target: 
 	}
 	changeSize(state, info, id, drop);
 }
+
+/**
+ * Moves a box mid-drag: it goes where the mouse is and its directory grows to hold it, the same as a drop, so the
+ * directory's neighbors make room as it drags. Nothing it's over is pushed; that waits for the drop.
+ * @param state The view state.
+ * @param info The graph lookups.
+ * @param id The dragged box.
+ * @param target Where it is now, relative to the inside of its parent.
+ */
+export function dragTo(state: LayoutState, info: GraphInfo, id: string, target: Position): void {
+	function move(): void {
+		moveTo(state, info, id, target);
+		growToFit(state, info, id);
+	}
+	changeSize(state, info, id, move);
+}
