@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { randomBytes } from 'crypto';
 import { loadGraph } from './loadGraph';
-import { ExtensionToWebview, FlowScenario, ModelOption, WebviewToExtension } from '../messages';
+import { ExtensionToWebview, FlowScenario, ModelOption, StyleColors, WebviewToExtension } from '../messages';
 import { SavedLayout } from '../layout/saved';
 import { Graph } from '../graph/types';
 import { CODE_EXTENSIONS } from '../graph/imports';
@@ -68,6 +68,9 @@ export async function openGraphPanel(context: vscode.ExtensionContext): Promise<
 	async function handleMessage(message: WebviewToExtension): Promise<void> {
 		// the webview says "ready" each time its script starts, including after VS Code reloads a hidden panel
 		if (message.type === 'ready') {
+			// colors first, so the graph draws in them from the start
+			const style: ExtensionToWebview = { type: 'style', colors: readStyleColors() };
+			panel.webview.postMessage(style);
 			try {
 				const graph = await graphPromise;
 				const layout = context.workspaceState.get<SavedLayout>(LAYOUT_KEY);
@@ -199,14 +202,38 @@ export async function openGraphPanel(context: vscode.ExtensionContext): Promise<
 
 	panel.webview.onDidReceiveMessage(handleMessage, undefined, context.subscriptions);
 
-	// remember this panel for commands, and forget it once it closes
+	// a changed codeflow.* setting reaches the open graph right away
+	function handleSettingsChange(event: vscode.ConfigurationChangeEvent): void {
+		if (event.affectsConfiguration('codeflow')) {
+			const style: ExtensionToWebview = { type: 'style', colors: readStyleColors() };
+			panel.webview.postMessage(style);
+		}
+	}
+	const settingsListener = vscode.workspace.onDidChangeConfiguration(handleSettingsChange);
+
+	// remember this panel for commands, and forget it once it closes, along with its settings listener
 	currentPanel = panel;
 	function handleDispose(): void {
 		if (currentPanel === panel) {
 			currentPanel = undefined;
 		}
+		settingsListener.dispose();
 	}
 	panel.onDidDispose(handleDispose, undefined, context.subscriptions);
+}
+
+/**
+ * Reads the user's color settings.
+ * @returns Each codeflow.* color; an empty one means follow the theme.
+ */
+function readStyleColors(): StyleColors {
+	const settings = vscode.workspace.getConfiguration('codeflow');
+	return {
+		folder: settings.get<string>('folderColor', ''),
+		file: settings.get<string>('fileColor', ''),
+		arrow: settings.get<string>('arrowColor', ''),
+		highlight: settings.get<string>('highlightColor', ''),
+	};
 }
 
 async function openFlowPanel(context: vscode.ExtensionContext, workspaceFolder: vscode.WorkspaceFolder, graph: Graph, flow: FlowScenario): Promise<void> {
@@ -410,7 +437,11 @@ function buildHtml(scriptUri: vscode.Uri): string {
 			margin: 0;
 			padding: 0;
 			overflow: hidden;
-			background: var(--vscode-editor-background);
+			background-color: var(--vscode-editor-background);
+			/* a faint dot grid, like a scratchpad; applyCamera moves, spaces, and sizes it with the view */
+			--dot-size: 0.6px;
+			background-image: radial-gradient(circle, color-mix(in srgb, var(--vscode-editorLineNumber-foreground) 25%, transparent) var(--dot-size), transparent calc(var(--dot-size) + 0.5px));
+			background-size: 20px 20px;
 			color: var(--vscode-editor-foreground);
 			font-family: var(--vscode-font-family);
 			font-size: var(--vscode-font-size);
@@ -448,8 +479,12 @@ function buildHtml(scriptUri: vscode.Uri): string {
 			/* dragging boxes and panning shouldn't select their text; the sidebar is outside, so paths there still copy */
 			user-select: none;
 		}
-		#world.gliding {
+		/* while the view glides to a box, the dots glide along with it */
+		body.gliding #world {
 			transition: transform 300ms ease-out;
+		}
+		body.gliding {
+			transition: background-position 300ms ease-out, background-size 300ms ease-out;
 		}
 		.arrow {
 			position: absolute;
@@ -461,7 +496,7 @@ function buildHtml(scriptUri: vscode.Uri): string {
 		/* --arrow-width is set on each arrow, thicker the more imports it stands for */
 		.arrow path {
 			fill: none;
-			stroke: var(--vscode-editorLineNumber-foreground);
+			stroke: var(--cf-arrow, var(--vscode-editorLineNumber-foreground));
 			stroke-width: var(--arrow-width, 1.5px);
 		}
 		/* the wide, invisible copy of each arrow that catches its clicks */
@@ -473,7 +508,7 @@ function buildHtml(scriptUri: vscode.Uri): string {
 		}
 		/* each arrow's head, a filled triangle drawn with it, so it takes the same colors as its line */
 		.arrow path.arrow-head {
-			fill: var(--vscode-editorLineNumber-foreground);
+			fill: var(--cf-arrow, var(--vscode-editorLineNumber-foreground));
 			stroke: none;
 		}
 		.arrow:hover path.arrow-line {
@@ -484,10 +519,10 @@ function buildHtml(scriptUri: vscode.Uri): string {
 		}
 		/* a selected arrow keeps its width and turns yellow */
 		.arrow.selected path.arrow-line {
-			stroke: var(--vscode-charts-yellow, #e2c08d);
+			stroke: var(--cf-highlight, var(--vscode-charts-yellow, #e2c08d));
 		}
 		.arrow.selected path.arrow-head {
-			fill: var(--vscode-charts-yellow, #e2c08d);
+			fill: var(--cf-highlight, var(--vscode-charts-yellow, #e2c08d));
 		}
 		/* arrows that aren't the selected box's, in the default arrow setting */
 		.arrow.faint {
@@ -504,7 +539,11 @@ function buildHtml(scriptUri: vscode.Uri): string {
 			flex-direction: column;
 			border: 1px solid var(--vscode-panel-border);
 			border-radius: 8px;
-			background: var(--vscode-editorWidget-background);
+			/* anything inside, like a folder's tinted title, follows the rounded corners */
+			overflow: hidden;
+			/* one step lighter (toward the text color) per level of nesting, so a box always stands out from the one
+			   around it; --depth is set on each box */
+			background: color-mix(in srgb, var(--vscode-editor-foreground) min(calc(var(--depth, 1) * var(--cf-shade-step, 4%)), var(--cf-max-shade, 24%)), var(--vscode-editor-background));
 		}
 		.box-title {
 			display: flex;
@@ -621,7 +660,7 @@ function buildHtml(scriptUri: vscode.Uri): string {
 			font-weight: 600;
 		}
 		.box.selected {
-			border-color: var(--vscode-charts-yellow, #e2c08d);
+			border-color: var(--cf-highlight, var(--vscode-charts-yellow, #e2c08d));
 		}
 		/* the box under the mouse, so it's clear which one a click would act on; the selected box keeps its own
 		   border, and nothing lights up while dragging, panning, or resizing */
@@ -643,8 +682,16 @@ function buildHtml(scriptUri: vscode.Uri): string {
 		.chevron:hover {
 			background: var(--vscode-toolbar-hoverBackground);
 		}
-		.box.open {
-			background: var(--vscode-editor-background);
+		/* folders: an accent bar down the left edge, and a faint tint of it in the title */
+		.box.directory {
+			box-shadow: inset 3px 0 0 var(--cf-folder, var(--vscode-charts-blue));
+		}
+		/* files: no bar unless the user picks a file color */
+		.box.file {
+			box-shadow: inset 3px 0 0 var(--cf-file, transparent);
+		}
+		.box.directory > .box-title {
+			background: color-mix(in srgb, var(--cf-folder, var(--vscode-charts-blue)) 10%, transparent);
 		}
 		/* the root, around everything: see-through, with a faint dashed border, so it doesn't compete with what's inside */
 		.box.repo {
@@ -1048,11 +1095,30 @@ function buildHtml(scriptUri: vscode.Uri): string {
 		.sidebar-row:has(.icon-button) {
 			align-items: center;
 		}
-		.sidebar-directory {
-			font-weight: 600;
+		/* opens or closes a folder row in the import lists; an empty spot on file rows keeps names lined up */
+		.sidebar-toggle {
+			flex-shrink: 0;
+			width: 14px;
+			color: var(--vscode-descriptionForeground);
+			font-size: 10px;
+			text-align: center;
 		}
-		.sidebar-indented {
-			padding-left: 16px;
+		.sidebar-toggle:not(:empty) {
+			cursor: pointer;
+		}
+		.sidebar-toggle:not(:empty):hover {
+			color: var(--vscode-editor-foreground);
+		}
+		/* how many imports go through a row */
+		.sidebar-count {
+			flex-shrink: 0;
+			color: var(--vscode-descriptionForeground);
+			font-size: 11px;
+		}
+		/* "hidden in", before an arrow end that's a strip: dim, like a note */
+		.sidebar-hidden {
+			color: var(--vscode-descriptionForeground);
+			font-weight: normal;
 		}
 		.sidebar-empty {
 			color: var(--vscode-descriptionForeground);

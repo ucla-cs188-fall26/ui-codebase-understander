@@ -23,7 +23,7 @@ Each rule should become a test.
 - Columns are centered vertically.
 - Padding between boxes is even by default, whatever their sizes.
 - A directory opens on its first page: the top-left of its layout, at full spacing, sized to show about 5 children. The rest wait behind strips on the sides their homes are on.
-- The root's first page holds every top-level node with an arrow in or out, plus up to 5 of the rest. Its layout puts the ones in the flow first, so the others (configs, docs) come after them, on later pages.
+- The root's first page is as wide as every top-level node with an arrow in or out, plus up to 5 of the rest, but at most 5 boxes down any column. Its layout puts the ones in the flow first, so the others (configs, docs) come after them, on later pages.
 - A directory never hides just one child.
 
 ## Size
@@ -87,6 +87,7 @@ Each rule should become a test.
 
 - Arrows are plain curves, each with its own connection point on a box's side.
 - An arrow connects to whichever side of a box is closest to its other end.
+- Each end of an arrow curves out of its side by half of how far the arrow travels that way, so an arrow leaving from a side next to the one facing its target bends out a little and turns, instead of looping far out.
 - An arrow's end goes where it points: straight across where its two boxes overlap, or else the point on the side nearest the other box, kept clear of the corners.
 - Ends sharing a side are nudged apart just enough not to overlap (room for each line or head, plus a small gap), keeping their order so they don't cross at the box. A side too crowded for that moves its outermost ends to the sides next to it, the ones whose other boxes lie furthest that way first; a side still too crowded spreads its ends evenly.
 - An arrow goes under every box, except the boxes at its ends and the open directories holding them. Its siblings' boxes and theirs count, however they're painted.
@@ -101,7 +102,10 @@ Each rule should become a test.
 
 ## Painting
 
+- The background is a faint dot grid that pans and zooms with the graph, spacing out when zoomed far out. Boxes cover it, except the see-through root.
 - The root is drawn as a transparent box with a faint dashed border, titled with the repo's name, so it doesn't compete with the boxes inside it.
+- Each box is one step lighter (toward the theme's text color) than the box around it, so nesting shows without relying on outlines. Folders have an accent bar down their left edge and a faint tint in their title; files stay neutral. The root stays see-through.
+- Folder, file, arrow, and highlight colors can be set in VS Code's settings (`codeflow.*`); empty ones follow the theme. Changes apply to an open graph right away.
 - A directory and everything inside it paint as one unit.
 - Order follows the layout, left to right, except a box being dragged.
 - The toolbar holds only icons: reset, fit, arrows, settings. Arrows and settings each open a popup; one is open at a time, and clicking outside or pressing Escape closes it.
@@ -112,6 +116,8 @@ Each rule should become a test.
 
 - Scrolling is always the global zoom. Directories don't scroll; their pages turn only by clicking a strip.
 - Positions are saved per workspace and survive closing the graph.
+- The sidebar lists what the selected box imports and what imports it the way its arrows are grouped (the arrow settings' depth), most imports first, each with its count. A folder row opens to the folders and files inside it.
+- Selecting an arrow shows its two ends and how many imports it stands for, then the files at each end, grouped by the folders inside each end's box, opening like the box sidebar's lists.
 - **Reset layout** returns to how things first looked: the default layout and sizes, with everything inside closed. It works on the whole graph (after a confirmation) or on one selected node, which stays open or closed as it was.
 
 ## Open questions

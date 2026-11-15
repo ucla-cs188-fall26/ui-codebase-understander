@@ -94,5 +94,19 @@ export interface FlowGraphMessage {
 	flow: FlowScenario;
 }
 
+// the user's color settings; an empty one means follow the theme
+export interface StyleColors {
+	folder: string;
+	file: string;
+	arrow: string;
+	highlight: string;
+}
+
+// sent when the graph opens and whenever a codeflow.* setting changes
+export interface StyleMessage {
+	type: 'style';
+	colors: StyleColors;
+}
+
 export type WebviewToExtension = ReadyMessage | OpenMessage | OpenFlowMessage | SaveLayoutMessage | RequestResetMessage | DiscoverModelsMessage | SelectModelMessage | GenerateFlowsMessage;
-export type ExtensionToWebview = GraphMessage | FlowGraphMessage | ResetLayoutMessage | ModelsMessage | FlowResultsMessage;
+export type ExtensionToWebview = GraphMessage | FlowGraphMessage | ResetLayoutMessage | ModelsMessage | FlowResultsMessage | StyleMessage;

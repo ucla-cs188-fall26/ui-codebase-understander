@@ -67,15 +67,17 @@ export function isInside(nodeId: string, containerId: string, nodesById: Map<str
 }
 
 /**
- * Lists what a node connects to across its boundary: for a directory, edges between its insides and the rest of the graph.
+ * Lists what a node connects to across its boundary, and how many edges go each way: for a directory, edges between
+ * its insides and the rest of the graph.
  * @param id The node.
  * @param edges Every edge in the graph.
  * @param nodesById Every node in the graph, by id.
- * @returns The nodes outside it that it has edges to, and the ones with edges into it, each once, in edge order.
+ * @returns The nodes outside it that it has edges to, and the ones with edges into it, each with how many edges, in
+ *   edge order.
  */
-export function connections(id: string, edges: Edge[], nodesById: Map<string, Node>): { outgoing: string[]; incoming: string[] } {
-	const outgoing = new Set<string>();
-	const incoming = new Set<string>();
+export function connections(id: string, edges: Edge[], nodesById: Map<string, Node>): { outgoing: Map<string, number>; incoming: Map<string, number> } {
+	const outgoing = new Map<string, number>();
+	const incoming = new Map<string, number>();
 
 	for (const edge of edges) {
 		const fromInside = isInside(edge.from, id, nodesById);
@@ -83,14 +85,14 @@ export function connections(id: string, edges: Edge[], nodesById: Map<string, No
 
 		// only edges crossing the boundary: one end inside, the other outside
 		if (fromInside && !toInside) {
-			outgoing.add(edge.to);
+			outgoing.set(edge.to, (outgoing.get(edge.to) ?? 0) + 1);
 		}
 		if (!fromInside && toInside) {
-			incoming.add(edge.from);
+			incoming.set(edge.from, (incoming.get(edge.from) ?? 0) + 1);
 		}
 	}
 
-	return { outgoing: Array.from(outgoing), incoming: Array.from(incoming) };
+	return { outgoing: outgoing, incoming: incoming };
 }
 
 /**

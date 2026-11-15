@@ -6,11 +6,11 @@ import { computeIndegrees, sortChildren } from '../analysis/metrics';
 import { connections, findChildContaining, liftEdges } from '../analysis/edges';
 import { assignColumns, findBackEdges } from '../layout/columns';
 import { defaultLayout, GAP } from '../layout/defaultLayout';
-import { arrowHead, arrowPath, arrowWidth, chooseSides, placeArrows } from '../layout/arrows';
+import { arrowHead, arrowPath, arrowPulls, arrowWidth, chooseSides, placeArrows } from '../layout/arrows';
 import { fitCamera, MAX_SCALE, zoomAt } from '../layout/camera';
 import { boundsOf, subtractRect } from '../layout/geometry';
 import { arrangeChildren, arrangeShown, boxSize, changeSize, buildGraphInfo, childOrigin, closeNode, copyLayoutState, createLayoutState, defaultSize, GraphInfo, LayoutState, moveTo, openNode, PADDING, hiddenSides, listPages, resetNode, resizeTo, showNode, turnPage, turnToPage } from '../layout/state';
-import { arrowTouches, arrowZIndex, boxesUnderArrow, boxZIndexes, placeBoxes, placeStrips, stripId, visibleEdges } from '../layout/place';
+import { arrowTouches, arrowZIndex, boxesUnderArrow, boxZIndexes, groupInside, groupLinks, placeBoxes, placeStrips, stripId, visibleEdges } from '../layout/place';
 import { fromSaved, toSaved } from '../layout/saved';
 import { dragTo, dropAt, settleDrop } from '../layout/drop';
 import { minSquishHeight, minSquishWidth, squishHorizontally, squishVertically } from '../layout/squish';
@@ -238,13 +238,74 @@ suite('connections', () => {
 
 		// b → c stays inside lib, so only the edges in from a.ts and out to README.md count
 		assert.deepStrictEqual(connections('src/lib', edges, nodesById), {
-			outgoing: ['README.md'],
-			incoming: ['src/a.ts'],
+			outgoing: new Map([['README.md', 1]]),
+			incoming: new Map([['src/a.ts', 1]]),
 		});
 		assert.deepStrictEqual(connections('src/a.ts', edges, nodesById), {
-			outgoing: ['src/lib/b.ts'],
-			incoming: [],
+			outgoing: new Map([['src/lib/b.ts', 1]]),
+			incoming: new Map(),
 		});
+	});
+});
+
+suite('groupLinks', () => {
+	// app/error is imported by app/index.js, by two files deep in app/api, and by scripts/seed.js
+	function makeImporters() {
+		const nodes = buildTree('repo', ['app/error/index.js', 'app/index.js', 'app/api/v1/auth.js', 'app/api/v1/user.js', 'scripts/seed.js']);
+		const info = buildGraphInfo({ nodes: nodes, edges: [] });
+		const counts = new Map([['app/index.js', 1], ['app/api/v1/auth.js', 2], ['app/api/v1/user.js', 1], ['scripts/seed.js', 1]]);
+		return { info: info, counts: counts };
+	}
+
+	test('groups like the arrows at depth 1, most imports first, and opens down to the files', () => {
+		const { info, counts } = makeImporters();
+
+		const groups = groupLinks('app/error', counts, info, 1);
+
+		// inside app, one level below it; from outside app, the top-level folder
+		const top: string[] = [];
+		for (const group of groups) {
+			top.push(group.id + ' ' + group.count);
+		}
+		assert.deepStrictEqual(top, ['app/api 3', 'app/index.js 1', 'scripts 1']);
+		const v1 = groups[0].children[0];
+		assert.strictEqual(v1.id, 'app/api/v1');
+		assert.deepStrictEqual(v1.children.map(function idOf(group) {
+			return group.id;
+		}), ['app/api/v1/auth.js', 'app/api/v1/user.js']);
+	});
+
+	test('groups the files inside a box from one level inside it, counts adding up', () => {
+		const { info } = makeImporters();
+		const inside = new Map([['app/api/v1/auth.js', 2], ['app/api/v1/user.js', 1]]);
+
+		const groups = groupInside('app/api', inside, info);
+
+		assert.strictEqual(groups.length, 1);
+		assert.strictEqual(groups[0].id, 'app/api/v1');
+		assert.strictEqual(groups[0].count, 3);
+		assert.strictEqual(groups[0].children.length, 2);
+	});
+
+	test('a file box is its own single row', () => {
+		const { info } = makeImporters();
+
+		const groups = groupInside('app/index.js', new Map([['app/index.js', 3]]), info);
+
+		assert.deepStrictEqual(groups, [{ id: 'app/index.js', count: 3, children: [] }]);
+	});
+
+	test('lists the files themselves at the deepest depth', () => {
+		const { info, counts } = makeImporters();
+
+		const groups = groupLinks('app/error', counts, info, 10);
+
+		assert.deepStrictEqual(groups.map(function idOf(group) {
+			return group.id;
+		}), ['app/api/v1/auth.js', 'app/api/v1/user.js', 'app/index.js', 'scripts/seed.js']);
+		for (const group of groups) {
+			assert.deepStrictEqual(group.children, []);
+		}
 	});
 });
 
@@ -515,6 +576,24 @@ suite('arrowPath', () => {
 
 		// 100 apart, so each pull point sits 50 out: both land at x = 150
 		assert.strictEqual(arrowPath(arrow), 'M 100 25 C 150 25, 150 25, 200 25');
+	});
+
+	test('bends only a little out of a side that doesn\'t face where the arrow goes', () => {
+		// leaving the top of a box for a target 500 right and only 50 up
+		const arrow = {
+			from: 'a',
+			to: 'b',
+			start: { x: 0, y: 0 },
+			startSide: 'top' as const,
+			end: { x: 500, y: -50 },
+			endSide: 'left' as const,
+		};
+
+		const pulls = arrowPulls(arrow);
+
+		// half of 50 is under the smallest pull, 30; going in, half of the 500 across
+		assert.deepStrictEqual(pulls.first, { x: 0, y: -30 });
+		assert.deepStrictEqual(pulls.second, { x: 250, y: -50 });
 	});
 });
 
@@ -1805,8 +1884,8 @@ suite('placeStrips', () => {
 		}
 	});
 
-	test('the root\'s first page shows every top-level node in the flow and 5 of the rest, the others behind its strip', () => {
-		// a imports b; seven other files import nothing and nothing imports them
+	test('the root\'s first page shows the flow, and at most 5 boxes down a column, the others behind its strip', () => {
+		// a imports b; seven other files import nothing and nothing imports them, and stack below a
 		const paths = ['a.ts', 'b.ts'];
 		for (let i = 1; i <= 7; i++) {
 			paths.push('u' + i + '.txt');
@@ -1816,16 +1895,16 @@ suite('placeStrips', () => {
 		openNode(state, info, ROOT_ID);
 		const rects = placeBoxes(state, info, { x: 0, y: 0 });
 
-		// the root's own box, plus the two in the flow and five others
+		// the root's own box, the two in the flow, and four others: a's column holds a and the four below it
 		assert.ok(rects.has(ROOT_ID) && rects.has('a.ts') && rects.has('b.ts'));
-		assert.strictEqual(rects.size, 1 + 2 + 5);
+		assert.strictEqual(rects.size, 1 + 2 + 4);
 
-		// the other two wait inside the root, below its boxes
+		// the other three wait inside the root, below its boxes
 		const strips = placeStrips(state, info, rects);
 		assert.strictEqual(strips.length, 1);
 		assert.strictEqual(strips[0].ownerId, ROOT_ID);
 		assert.strictEqual(strips[0].side, 'bottom');
-		assert.strictEqual(strips[0].hiddenIds.length, 2);
+		assert.strictEqual(strips[0].hiddenIds.length, 3);
 		const root = rects.get(ROOT_ID)!;
 		for (const [id, rect] of rects) {
 			if (id !== ROOT_ID) {

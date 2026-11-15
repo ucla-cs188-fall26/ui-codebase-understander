@@ -25,6 +25,31 @@
         "icon": "$(discard)"
       }
     ],
+    "configuration": {
+      "title": "Codeflow",
+      "properties": {
+        "codeflow.folderColor": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Folders' accent: the bar down their left edge and the tint in their title. Any CSS color, like `#4ea1ff`. Empty follows the theme."
+        },
+        "codeflow.fileColor": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "A bar down files' left edge, like folders have. Any CSS color. Empty means no bar."
+        },
+        "codeflow.arrowColor": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Arrows and their heads. Any CSS color. Empty follows the theme."
+        },
+        "codeflow.highlightColor": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "The selected box's border and the selected arrow. Any CSS color. Empty follows the theme."
+        }
+      }
+    },
     "menus": {
       "editor/title": [
         {

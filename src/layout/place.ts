@@ -257,6 +257,103 @@ export function arrowEndsOf(edge: Edge, state: LayoutState, info: GraphInfo, rec
 	return { from: from, to: to };
 }
 
+// one row in the sidebar's lists of what a box connects to: a node, how many imports go through it, and the rows
+// inside it, most imports first
+export interface LinkGroup {
+	id: string;
+	count: number;
+	children: LinkGroup[];
+}
+
+/**
+ * Groups what a box connects to the way its arrows are grouped: each far node is lifted to its folder at the depth
+ * setting, measured from the folder the box and that node share, which makes a top row; the rows under it follow the
+ * folders down to the node itself.
+ * @param selectedId The box whose connections these are.
+ * @param counts Each node at the far end, with how many imports go to or from it, from connections.
+ * @param info The graph lookups.
+ * @param maxDepth The arrow settings' depth.
+ * @returns The top rows, most imports first, each holding its rows below.
+ */
+export function groupLinks(selectedId: string, counts: Map<string, number>, info: GraphInfo, maxDepth: number): LinkGroup[] {
+	// at the depth setting, measured from the folder the box and each node share, like the arrows
+	function startDepth(farId: string): number {
+		const shared = commonAncestor(selectedId, farId, info);
+		return getLineage(shared, info.nodesById).length - 1 + maxDepth;
+	}
+	return buildLinkRows(counts, info, startDepth);
+}
+
+/**
+ * Groups the nodes inside a box by the folders they're in, starting one level inside the box, as if it were opened.
+ * A box that's a file is its own single row.
+ * @param boxId The box.
+ * @param counts Each node inside it, with how many imports go through it.
+ * @param info The graph lookups.
+ * @returns The top rows, most imports first, each holding its rows below.
+ */
+export function groupInside(boxId: string, counts: Map<string, number>, info: GraphInfo): LinkGroup[] {
+	// a lineage runs from the node up to the root, so the box's children are as deep as its lineage is long
+	const insideDepth = getLineage(boxId, info.nodesById).length;
+	function startDepth(): number {
+		return insideDepth;
+	}
+	return buildLinkRows(counts, info, startDepth);
+}
+
+/**
+ * Builds rows from nodes and their counts: each node's row sits under the rows of the folders it's in, from a depth
+ * the caller picks down to the node; a row's count is the total of the nodes under it.
+ * @param counts Each node, with how many imports go through it.
+ * @param info The graph lookups.
+ * @param startDepth For a node, the depth its top row is at (top-level boxes are 1). Deeper than the node itself means
+ *   the node is its own top row.
+ * @returns The top rows, most imports first, each holding its rows below.
+ */
+function buildLinkRows(counts: Map<string, number>, info: GraphInfo, startDepth: (id: string) => number): LinkGroup[] {
+	// built with maps so each row is found by id, then turned into sorted lists
+	interface Building {
+		id: string;
+		count: number;
+		children: Map<string, Building>;
+	}
+	const top = new Map<string, Building>();
+
+	for (const [farId, count] of counts) {
+		// a lineage from the root down, so entry k is at depth k
+		const lineage = getLineage(farId, info.nodesById).reverse();
+		const limit = startDepth(farId);
+
+		// from the folder at the start depth (or the node itself, if it's shallower) down to the node
+		let level = top;
+		for (let depth = Math.min(limit, lineage.length - 1); depth < lineage.length; depth++) {
+			const id = lineage[depth];
+			let row = level.get(id);
+			if (row === undefined) {
+				row = { id: id, count: 0, children: new Map() };
+				level.set(id, row);
+			}
+			row.count += count;
+			level = row.children;
+		}
+	}
+
+	function mostFirst(a: LinkGroup, b: LinkGroup): number {
+		if (a.count !== b.count) {
+			return b.count - a.count;
+		}
+		return a.id.localeCompare(b.id);
+	}
+	function finish(rows: Map<string, Building>): LinkGroup[] {
+		const list: LinkGroup[] = [];
+		for (const row of rows.values()) {
+			list.push({ id: row.id, count: row.count, children: finish(row.children) });
+		}
+		return list.sort(mostFirst);
+	}
+	return finish(top);
+}
+
 // an arrow between two visible boxes or strips, standing for one or more of the graph's edges
 export interface VisibleEdge extends Edge {
 	count: number; // how many of the graph's edges it stands for

@@ -793,9 +793,39 @@ function placeUnplaced(state: LayoutState, info: GraphInfo, parentId: string, pl
 }
 
 /**
+ * Finds how tall a page has to be to hold CHILD_LIMIT boxes down each column, and no more: boxes in a column share
+ * their left edge in the default layout.
+ * @param state The view state.
+ * @param info The graph lookups.
+ * @param ids The boxes to measure, with homes.
+ * @returns The furthest bottom of any column's CHILD_LIMIT-th box (or its last, if shorter), plus the gap after it.
+ */
+function columnLimitHeight(state: LayoutState, info: GraphInfo, ids: string[]): number {
+	// each column's boxes, by their left edge
+	const columns = new Map<number, string[]>();
+	for (const id of ids) {
+		const x = state.homes.get(id)!.x;
+		const column = columns.get(x) ?? [];
+		column.push(id);
+		columns.set(x, column);
+	}
+
+	function topFirst(a: string, b: string): number {
+		return state.homes.get(a)!.y - state.homes.get(b)!.y;
+	}
+	let height = 1;
+	for (const column of columns.values()) {
+		for (const id of column.sort(topFirst).slice(0, CHILD_LIMIT)) {
+			height = Math.max(height, state.homes.get(id)!.y + boxSize(state, info, id).height + GAP);
+		}
+	}
+	return height;
+}
+
+/**
  * Gives a directory its pages the first time it opens, and its children the page each is on. The first page is sized
  * to hold its CHILD_LIMIT most important children from the top-left; for the root, everything in the flow plus up to
- * CHILD_LIMIT of the rest. A directory that already has pages keeps them, and only children new to it get a page, so
+ * CHILD_LIMIT of the rest, but no more than CHILD_LIMIT boxes down any column. A directory that already has pages keeps them, and only children new to it get a page, so
  * nothing moves to another page on its own.
  * @param state The view state. Gets the pages.
  * @param info The graph lookups.
@@ -826,6 +856,11 @@ function givePages(state: LayoutState, info: GraphInfo, parentId: string, newIds
 			const size = boxSize(state, info, id);
 			width = Math.max(width, home.x + size.width + GAP);
 			height = Math.max(height, home.y + size.height + GAP);
+		}
+
+		// the root's first page is as wide as its flow, but no taller than CHILD_LIMIT boxes down any column
+		if (parentId === ROOT_ID) {
+			height = Math.min(height, columnLimitHeight(state, info, firstPage));
 		}
 		const size = { width: width, height: height };
 		page = { column: 0, row: 0, anchor: { x: 0, y: 0 }, size: size, natural: size, drawnFrom: { x: 0, y: 0 } };

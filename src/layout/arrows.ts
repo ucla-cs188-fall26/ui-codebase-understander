@@ -443,27 +443,43 @@ export function arrowHead(arrow: Arrow, width: number): { length: number; path: 
 }
 
 /**
- * Draws an arrow as a smooth curve that leaves and enters its boxes head-on.
+ * Works out the two points an arrow's curve bends through, straight out from each end's side. Each end pulls out by
+ * half of how far the arrow goes in that end's direction, at least MIN_PULL: an end facing its other box eases
+ * across, and one leaving from a side next to the facing one (spilled there) bends out a little, then turns, instead
+ * of looping far out.
+ * @param arrow The arrow, from placeArrows.
+ * @returns The pull point out of the start's side, then the one out of the end's side.
+ */
+export function arrowPulls(arrow: Arrow): { first: Position; second: Position } {
+	const startDirection = directionOf(arrow.startSide);
+	const endDirection = directionOf(arrow.endSide);
+
+	// how far the arrow travels in each end's outward direction; going the other way counts as nothing
+	const startReach = (arrow.end.x - arrow.start.x) * startDirection.x + (arrow.end.y - arrow.start.y) * startDirection.y;
+	const endReach = (arrow.start.x - arrow.end.x) * endDirection.x + (arrow.start.y - arrow.end.y) * endDirection.y;
+	const startPull = Math.max(MIN_PULL, startReach / 2);
+	const endPull = Math.max(MIN_PULL, endReach / 2);
+
+	return {
+		first: { x: arrow.start.x + startDirection.x * startPull, y: arrow.start.y + startDirection.y * startPull },
+		second: { x: arrow.end.x + endDirection.x * endPull, y: arrow.end.y + endDirection.y * endPull },
+	};
+}
+
+/**
+ * Draws an arrow as a smooth curve that leaves and enters its boxes head-on. Each end pulls out as arrowPulls says.
  * @param arrow The arrow, from placeArrows.
  * @param endGap How far before the arrow's end the curve stops, straight out from the side it ends at, so an
  *   arrowhead can fill the rest. The curve's shape doesn't change.
  * @returns An SVG path: move to the start, then a cubic curve through two pull points to the end.
  */
 export function arrowPath(arrow: Arrow, endGap: number = 0): string {
-	// pull further for longer arrows, so they curve gently instead of kinking
-	const distance = Math.hypot(arrow.end.x - arrow.start.x, arrow.end.y - arrow.start.y);
-	const pull = Math.max(MIN_PULL, distance / 2);
-
-	const startDirection = directionOf(arrow.startSide);
 	const endDirection = directionOf(arrow.endSide);
-
-	// each pull point sits straight out from its side
-	const pull1 = { x: arrow.start.x + startDirection.x * pull, y: arrow.start.y + startDirection.y * pull };
-	const pull2 = { x: arrow.end.x + endDirection.x * pull, y: arrow.end.y + endDirection.y * pull };
+	const pulls = arrowPulls(arrow);
 	const end = { x: arrow.end.x + endDirection.x * endGap, y: arrow.end.y + endDirection.y * endGap };
 
 	return 'M ' + arrow.start.x + ' ' + arrow.start.y
-		+ ' C ' + pull1.x + ' ' + pull1.y
-		+ ', ' + pull2.x + ' ' + pull2.y
+		+ ' C ' + pulls.first.x + ' ' + pulls.first.y
+		+ ', ' + pulls.second.x + ' ' + pulls.second.y
 		+ ', ' + end.x + ' ' + end.y;
 }

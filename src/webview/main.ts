@@ -1,15 +1,16 @@
 import { Edge, Node, NodeKind, ROOT_ID } from '../graph/types';
 import { ExtensionToWebview, FlowGraphMessage, FlowScenario, ModelOption, WebviewToExtension } from '../messages';
 import { connections, isInside } from '../analysis/edges';
-import { getLineage, groupByParent } from '../analysis/lookups';
-import { Arrow, arrowHead, arrowPath, arrowWidth, placeArrows } from '../layout/arrows';
+import { getLineage } from '../analysis/lookups';
+import { Arrow, arrowHead, arrowPath, arrowPulls, arrowWidth, placeArrows } from '../layout/arrows';
 import { Camera, fitCamera, zoomAt } from '../layout/camera';
 import { boundsOf, Position, Rect, Size, subtractRect } from '../layout/geometry';
 import { arrangeShown, boxSize, buildGraphInfo, closeNode, copyLayoutState, createLayoutState, fitPagesToSizes, listPages, GraphInfo, layOutChildren, LayoutState, openNode, resetNode, resizeTo, StripSide, turnPage, PageListing, showNode, turnToPage } from '../layout/state';
 import { ArrowMode, fromSaved, toSaved } from '../layout/saved';
 import { dragTo, dropAt } from '../layout/drop';
+import { applyStyle } from './style';
 import { makeArrowsIcon, makeCloseIcon, makeFitIcon, makeGripIcon, makeOpenIcon, makeResetIcon, makeResizeIcon, makeSettingsIcon, SVG_NS } from './icons';
-import { arrowEndsOf, arrowTouches, arrowZIndex, boxesUnderArrow, boxZIndexes, nodeOfEnd, placeBoxes, placeStrips, Strip, VisibleEdge, visibleEdges } from '../layout/place';
+import { arrowEndsOf, arrowTouches, arrowZIndex, boxesUnderArrow, boxZIndexes, groupInside, groupLinks, LinkGroup, nodeOfEnd, placeBoxes, placeStrips, Strip, VisibleEdge, visibleEdges } from '../layout/place';
 
 // VS Code provides this once per webview; calling it a second time throws
 declare function acquireVsCodeApi(): { postMessage(message: WebviewToExtension): void };
@@ -202,12 +203,16 @@ function makeArrow(arrow: Arrow, edge: VisibleEdge, zIndex: number, under: Rect[
 	svg.style.zIndex = String(zIndex);
 	// The SVG needs a viewport around the whole curve; otherwise only the portion in its default 300x150 box
 	// receives pointer events, even though overflow lets the rest of the curve remain visible.
-	// The extra 6 is half the click target's width, so its edges aren't cut off.
-	const pull = Math.max(30, Math.hypot(arrow.end.x - arrow.start.x, arrow.end.y - arrow.start.y) / 2) + 6;
-	const left = Math.min(arrow.start.x, arrow.end.x) - pull;
-	const top = Math.min(arrow.start.y, arrow.end.y) - pull;
-	const width = Math.abs(arrow.end.x - arrow.start.x) + pull * 2;
-	const height = Math.abs(arrow.end.y - arrow.start.y) + pull * 2;
+	// A curve never leaves the shape its ends and pull points make, so their bounds hold it; the margin is room for the
+	// click target (12 wide) and the widest head (16).
+	const pulls = arrowPulls(arrow);
+	const xs = [arrow.start.x, arrow.end.x, pulls.first.x, pulls.second.x];
+	const ys = [arrow.start.y, arrow.end.y, pulls.first.y, pulls.second.y];
+	const margin = 10;
+	const left = Math.min(...xs) - margin;
+	const top = Math.min(...ys) - margin;
+	const width = Math.max(...xs) - Math.min(...xs) + margin * 2;
+	const height = Math.max(...ys) - Math.min(...ys) + margin * 2;
 	svg.setAttribute('viewBox', left + ' ' + top + ' ' + width + ' ' + height);
 	svg.setAttribute('width', String(width));
 	svg.setAttribute('height', String(height));
@@ -476,6 +481,9 @@ function drawGraph(): void {
 		const kind = isOpen ? node.kind + ' open' : node.kind;
 		const box = makeBox(node.name, kind, rect.x, rect.y, rect.width, rect.height);
 
+		// how deeply it's nested, for its shade: top-level boxes are 1; a lineage runs from the node up to the root
+		box.style.setProperty('--depth', String(getLineage(id, info.nodesById).length - 1));
+
 		// so a click can tell which node it landed on
 		box.dataset.id = id;
 		box.style.zIndex = String(boxZ.get(id));
@@ -624,6 +632,12 @@ function drawSidebar(): void {
 	const node = info.nodesById.get(selectedId!)!;
 	sidebar.replaceChildren();
 
+	// rows opened in the lists belong to the box they were opened for
+	if (openLinkRowsFor !== selectedId) {
+		openLinkRows.clear();
+		openLinkRowsFor = selectedId;
+	}
+
 	const header = document.createElement('div');
 	header.className = 'sidebar-header';
 	const name = document.createElement('span');
@@ -673,19 +687,51 @@ function drawSidebar(): void {
 	addDetail(sidebar, 'Times imported', String(info.indegrees.get(selectedId!)));
 
 	const linked = connections(selectedId!, info.edges, info.nodesById);
-	addConnectionList(sidebar, 'Imports', linked.outgoing);
-	addConnectionList(sidebar, 'Imported by', linked.incoming);
+	addConnectionList(sidebar, 'Imports', groupLinks(selectedId!, linked.outgoing, info, arrowDepth));
+	addConnectionList(sidebar, 'Imported by', groupLinks(selectedId!, linked.incoming, info, arrowDepth));
 
 	sidebar.classList.add('visible');
 }
 
-/** Shows the concrete graph edges represented by the selected visible arrow. */
+/**
+ * Shows the selected arrow in the sidebar: its two ends and how many imports it stands for, then the files at each
+ * end, grouped by the folders inside each end's box and opening like the box sidebar's lists.
+ * @param sidebar The sidebar element.
+ * @param selected The arrow's edge.
+ */
 function drawEdgeSidebar(sidebar: HTMLElement, selected: Edge): void {
 	sidebar.replaceChildren();
+
+	// rows opened in the lists stay open while this arrow is selected
+	const arrowKey = selected.from + '\n\n' + selected.to;
+	if (openLinkRowsFor !== arrowKey) {
+		openLinkRows.clear();
+		openLinkRowsFor = arrowKey;
+	}
+
+	const rects = placeBoxes(state, info!, { x: START_X, y: START_Y });
+	const strips = placeStrips(state, info!, rects);
+	// grouped the same way the arrows are drawn, so a merged arrow lists every import it stands for
+	const represented = info!.edges.filter((edge) => {
+		const ends = arrowEndsOf(edge, state, info!, rects, strips, arrowDepth);
+		return ends !== undefined && ends.from === selected.from && ends.to === selected.to;
+	});
+
+	// how many imports come from each file on one end, and go to each file on the other
+	const fromCounts = new Map<string, number>();
+	const toCounts = new Map<string, number>();
+	for (const edge of represented) {
+		fromCounts.set(edge.from, (fromCounts.get(edge.from) ?? 0) + 1);
+		toCounts.set(edge.to, (toCounts.get(edge.to) ?? 0) + 1);
+	}
+
+	// the header: the two ends
 	const header = document.createElement('div');
 	header.className = 'sidebar-header';
 	const title = document.createElement('span');
-	title.textContent = 'Relationship';
+	title.appendChild(makeEndLabel(selected.from, endName(selected.from)));
+	title.appendChild(document.createTextNode(' → '));
+	title.appendChild(makeEndLabel(selected.to, endName(selected.to)));
 	header.appendChild(title);
 	const close = document.createElement('button');
 	close.className = 'icon-button sidebar-close';
@@ -695,24 +741,65 @@ function drawEdgeSidebar(sidebar: HTMLElement, selected: Edge): void {
 	header.appendChild(close);
 	sidebar.appendChild(header);
 
-	const rects = placeBoxes(state, info!, { x: START_X, y: START_Y });
-	const strips = placeStrips(state, info!, rects);
-	// grouped the same way the arrows are drawn, so a merged arrow lists every import it stands for
-	const represented = info!.edges.filter((edge) => {
-		const ends = arrowEndsOf(edge, state, info!, rects, strips, arrowDepth);
-		return ends !== undefined && ends.from === selected.from && ends.to === selected.to;
-	});
-	for (const edge of represented) {
-		const from = info!.nodesById.get(edge.from)!;
-		const to = info!.nodesById.get(edge.to)!;
-		addDetail(sidebar, 'Relationship', from.name + ' ' + edge.kind + 's ' + to.name);
-		addDetail(sidebar, 'From', from.path);
-		addDetail(sidebar, 'To', to.path);
-	}
-	if (represented.length === 0) {
-		addDetail(sidebar, 'Relationship', nodeOfEnd(selected.from) + ' connects to ' + nodeOfEnd(selected.to));
-	}
+	// the same label and value rows as a box's sidebar; the ends' values are filled in after, since a hidden end is
+	// styled
+	addDetail(sidebar, 'From', '').querySelector('.sidebar-value')!.appendChild(makeEndLabel(selected.from, endPath(selected.from)));
+	addDetail(sidebar, 'To', '').querySelector('.sidebar-value')!.appendChild(makeEndLabel(selected.to, endPath(selected.to)));
+	addDetail(sidebar, 'Kind', 'import');
+	addDetail(sidebar, 'Imports', String(represented.length));
+
+	// section headings are plain, so a hidden end just says so in words
+	const fromBox = nodeOfEnd(selected.from);
+	const toBox = nodeOfEnd(selected.to);
+	addConnectionList(sidebar, 'From ' + hiddenPrefix(selected.from) + endName(selected.from), groupInside(fromBox, fromCounts, info!), fromBox);
+	addConnectionList(sidebar, 'To ' + hiddenPrefix(selected.to) + endName(selected.to), groupInside(toBox, toCounts, info!), toBox);
 	sidebar.classList.add('visible');
+}
+
+/**
+ * Names an arrow's end for the sidebar: its box's name, or for a strip, the folder it's hidden in.
+ * @param end A box's or strip's id.
+ * @returns The name.
+ */
+function endName(end: string): string {
+	return info!.nodesById.get(nodeOfEnd(end))!.name;
+}
+
+/**
+ * Writes where an arrow's end is, for the sidebar: its box's path, or for a strip, the folder it's hidden in.
+ * @param end A box's or strip's id.
+ * @returns The path.
+ */
+function endPath(end: string): string {
+	return info!.nodesById.get(nodeOfEnd(end))!.path;
+}
+
+/**
+ * Words to put before a hidden end's name, in plain text like section headings.
+ * @param end A box's or strip's id.
+ * @returns "hidden in " for a strip, nothing for a box.
+ */
+function hiddenPrefix(end: string): string {
+	return end === nodeOfEnd(end) ? '' : 'hidden in ';
+}
+
+/**
+ * Makes an arrow's end as the sidebar shows it: the name or path, after a dim, italic "hidden in" when the end is a
+ * strip, so it's clear the arrow goes to boxes hidden there.
+ * @param end A box's or strip's id.
+ * @param text Its name or path, from endName or endPath.
+ * @returns The element.
+ */
+function makeEndLabel(end: string, text: string): HTMLElement {
+	const label = document.createElement('span');
+	if (end !== nodeOfEnd(end)) {
+		const hidden = document.createElement('em');
+		hidden.className = 'sidebar-hidden';
+		hidden.textContent = 'hidden in ';
+		label.appendChild(hidden);
+	}
+	label.appendChild(document.createTextNode(text));
+	return label;
 }
 
 /**
@@ -831,19 +918,28 @@ function handleOpenClick(event: MouseEvent): void {
 	vscode.postMessage({ type: 'open', path: button.dataset.path!, kind: button.dataset.kind as NodeKind });
 }
 
+// which rows in the sidebar's lists are open, as the list's title and the row's id; forgotten when the selection changes
+const openLinkRows = new Set<string>();
+
+// the box the open rows belong to
+let openLinkRowsFor: string | undefined = undefined;
+
 /**
- * Adds a titled list of nodes to the sidebar; clicking one selects it.
+ * Adds a titled list of what the selected box connects to, grouped the way its arrows are, most imports first; a
+ * folder row opens to what's inside it, and clicking a row jumps to it.
  * @param sidebar The sidebar element.
  * @param title The section title.
- * @param ids The nodes to list.
+ * @param groups The rows, from groupLinks or groupInside.
+ * @param relativeTo A box whose rows these are inside, so top rows show their path from it; leave it out for full
+ *   paths.
  */
-function addConnectionList(sidebar: HTMLElement, title: string, ids: string[]): void {
+function addConnectionList(sidebar: HTMLElement, title: string, groups: LinkGroup[], relativeTo?: string): void {
 	const heading = document.createElement('div');
 	heading.className = 'sidebar-section';
 	heading.textContent = title;
 	sidebar.appendChild(heading);
 
-	if (ids.length === 0) {
+	if (groups.length === 0) {
 		const empty = document.createElement('div');
 		empty.className = 'sidebar-empty';
 		empty.textContent = 'None';
@@ -851,41 +947,74 @@ function addConnectionList(sidebar: HTMLElement, title: string, ids: string[]): 
 		return;
 	}
 
-	// directory by directory: each directory as a heading you can jump to, then its files by name
-	for (const [parentId, childIds] of groupByParent(ids, info!.nodesById)) {
-		// files at the top of the repo have no directory, so they get no heading and no indent
-		const isTopLevel = parentId === ROOT_ID;
-		if (!isTopLevel) {
-			sidebar.appendChild(makeLinkRow(parentId, parentId + '/', 'sidebar-directory'));
+	// top rows by their path (from the box they're inside, if any), so it's clear where they are; rows inside them by
+	// name, indented under them
+	function topRowText(id: string): string {
+		if (relativeTo !== undefined && id.startsWith(relativeTo + '/')) {
+			return id.slice(relativeTo.length + 1);
 		}
-
-		for (const id of childIds) {
-			const rowClass = isTopLevel ? '' : 'sidebar-indented';
-			sidebar.appendChild(makeLinkRow(id, info!.nodesById.get(id)!.name, rowClass));
+		return id;
+	}
+	function addRows(rows: LinkGroup[], level: number): void {
+		for (const row of rows) {
+			const key = title + '\n' + row.id;
+			const text = level === 0 ? topRowText(row.id) : info!.nodesById.get(row.id)!.name;
+			sidebar.appendChild(makeLinkRow(row, text, level, key));
+			if (openLinkRows.has(key)) {
+				addRows(row.children, level + 1);
+			}
 		}
 	}
+	addRows(groups, 0);
 }
 
 /**
- * Makes one sidebar row that jumps to a node when clicked, with a button to open it.
- * @param id The node.
+ * Makes one sidebar row: a toggle if it has rows inside it, its name, how many imports go through it, and a button to
+ * open it. Clicking the row jumps to it; clicking the toggle opens or closes it without jumping.
+ * @param row The row, from groupLinks.
  * @param text What the row says.
- * @param extraClass A class for how the row looks, like a directory heading or an indented file.
+ * @param level How deep it sits in the list, for its indent.
+ * @param key Which row it is, for remembering whether it's open.
  * @returns The row.
  */
-function makeLinkRow(id: string, text: string, extraClass: string): HTMLElement {
+function makeLinkRow(row: LinkGroup, text: string, level: number, key: string): HTMLElement {
 	const link = document.createElement('div');
-	link.className = 'sidebar-link ' + extraClass;
-	link.title = id; // the full path on hover
-	link.dataset.id = id;
+	link.className = 'sidebar-link';
+	link.style.paddingLeft = (level * 16) + 'px';
+	link.title = row.id; // the full path on hover
+	link.dataset.id = row.id;
 	link.addEventListener('click', handleConnectionClick);
+
+	// an empty spot for rows with nothing inside, so names line up
+	const toggle = document.createElement('span');
+	toggle.className = 'sidebar-toggle';
+	if (row.children.length > 0) {
+		toggle.textContent = openLinkRows.has(key) ? '▾' : '▸';
+		function flip(event: MouseEvent): void {
+			event.stopPropagation();
+			if (openLinkRows.has(key)) {
+				openLinkRows.delete(key);
+			} else {
+				openLinkRows.add(key);
+			}
+			drawSidebar();
+		}
+		toggle.addEventListener('click', flip);
+	}
+	link.appendChild(toggle);
 
 	const textElement = document.createElement('span');
 	textElement.className = 'sidebar-link-text';
 	textElement.textContent = text;
 	link.appendChild(textElement);
 
-	const node = info!.nodesById.get(id)!;
+	const count = document.createElement('span');
+	count.className = 'sidebar-count';
+	count.textContent = String(row.count);
+	count.title = row.count === 1 ? '1 import' : row.count + ' imports';
+	link.appendChild(count);
+
+	const node = info!.nodesById.get(row.id)!;
 	link.appendChild(makeOpenButton(node.path, node.kind));
 
 	return link;
@@ -956,7 +1085,7 @@ function fitToView(): void {
  */
 function glideTo(target: Camera): void {
 	camera = target;
-	document.getElementById('world')!.classList.add('gliding');
+	document.body.classList.add('gliding');
 	applyCamera();
 	setTimeout(stopGliding, GLIDE_TIME);
 }
@@ -965,7 +1094,7 @@ function glideTo(target: Camera): void {
  * Turns off the glide animation after glideTo.
  */
 function stopGliding(): void {
-	document.getElementById('world')!.classList.remove('gliding');
+	document.body.classList.remove('gliding');
 }
 
 /**
@@ -1438,12 +1567,28 @@ let camera: Camera = { x: 0, y: 0, scale: 1 };
 // how strongly one wheel step zooms; small, because trackpads send many tiny steps
 const ZOOM_SPEED = 0.005;
 
+// how far apart the background's dots are at normal zoom, in pixels
+const DOT_SPACING = 20;
+
+// how big a background dot is at normal zoom, and never smaller than the second, so it doesn't vanish zoomed out
+const DOT_SIZE = 0.6;
+const MIN_DOT_SIZE = 0.35;
+
 /**
- * Moves and scales the whole world to match the camera.
+ * Moves and scales the whole world to match the camera, and the background's dots with it.
  */
 function applyCamera(): void {
 	const world = document.getElementById('world')!;
 	world.style.transform = 'translate(' + camera.x + 'px, ' + camera.y + 'px) scale(' + camera.scale + ')';
+
+	// the dots move and space out with the world; zoomed far out, every other one is left out so they don't crowd
+	let spacing = DOT_SPACING * camera.scale;
+	while (spacing < DOT_SPACING / 2) {
+		spacing *= 2;
+	}
+	document.body.style.backgroundSize = spacing + 'px ' + spacing + 'px';
+	document.body.style.backgroundPosition = camera.x + 'px ' + camera.y + 'px';
+	document.body.style.setProperty('--dot-size', Math.max(MIN_DOT_SIZE, DOT_SIZE * camera.scale) + 'px');
 	scheduleSave();
 }
 
@@ -1784,6 +1929,10 @@ function handleClick(event: MouseEvent): void {
  * @param event The browser's message event. Its data is what the extension posted.
  */
 function handleMessage(event: MessageEvent<ExtensionToWebview>): void {
+	if (event.data.type === 'style') {
+		applyStyle(event.data.colors);
+		return;
+	}
 	if (event.data.type === 'flowGraph') {
 		drawFlowGraph(event.data);
 		return;
@@ -1849,5 +1998,6 @@ document.body.addEventListener('pointermove', handlePointerMove);
 document.body.addEventListener('pointerup', handlePointerUp);
 document.body.addEventListener('click', handleClick);
 
+applyStyle();
 drawToolbar();
 vscode.postMessage({ type: 'ready' });
