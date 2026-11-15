@@ -384,16 +384,34 @@ export interface VisibleEdge extends Edge {
  *   attach to their folder at that level. Infinity for no limit.
  * @param kept Boxes whose arrows start from the box itself even when the depth would merge them into a folder around
  *   it, like the selected box; their other ends still follow the depth.
+ * @param pinned The selected arrow, if any. The graph's edges it stands for keep its two ends while both are still
+ *   drawn, so it doesn't vanish when what's merged changes, and selecting it doesn't split any other arrow out.
  * @returns One edge per pair of ends with an edge between them, in the order first seen, each with the graph's edges
  *   that landed on it.
  */
-export function visibleEdges(state: LayoutState, info: GraphInfo, rects: Map<string, Rect>, strips: Strip[] = [], maxDepth: number = Infinity, kept: string[] = []): VisibleEdge[] {
+export function visibleEdges(state: LayoutState, info: GraphInfo, rects: Map<string, Rect>, strips: Strip[] = [], maxDepth: number = Infinity, kept: string[] = [], pinned: VisibleEdge | undefined = undefined): VisibleEdge[] {
 	// one per pair of ends, in the order first seen, counting the edges that land on it
 	const byEnds = new Map<string, VisibleEdge>();
 	const arrowEnds = makeArrowEndFinder(state, info, rects, strips, kept);
 
+	// a box or strip that's on screen, so an arrow can end at it
+	function isDrawn(id: string): boolean {
+		return rects.has(id) || strips.some((strip) => strip.id === id);
+	}
+
+	// the selected arrow's edges keep its ends, as long as both are still drawn
+	const pinnedEdges = new Set<Edge>();
+	if (pinned !== undefined && isDrawn(pinned.from) && isDrawn(pinned.to)) {
+		for (const edge of pinned.edges) {
+			pinnedEdges.add(edge);
+		}
+	}
+
 	for (const edge of info.edges) {
-		const ends = arrowEnds(edge, maxDepth);
+		let ends = arrowEnds(edge, maxDepth);
+		if (pinnedEdges.has(edge)) {
+			ends = { from: pinned!.from, to: pinned!.to };
+		}
 		if (ends === undefined) {
 			continue;
 		}

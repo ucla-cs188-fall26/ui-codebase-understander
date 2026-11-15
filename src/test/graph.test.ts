@@ -2128,6 +2128,21 @@ suite('arrow depth', () => {
 		assert.ok(describe(edges).includes('app/api/login.ts > scripts x1'));
 	});
 
+	test('a pinned arrow keeps its ends without splitting out any other arrow', () => {
+		const { info, state, rects } = makeApp();
+
+		// login.ts was selected, so its arrow to db was split out; then that arrow was clicked, deselecting login.ts
+		const withLogin = visibleEdges(state, info, rects, [], 1, ['app/api/login.ts']);
+		const clicked = withLogin.find((visible) => visible.from === 'app/api/login.ts' && visible.to === 'app/db')!;
+		const edges = visibleEdges(state, info, rects, [], 1, [], clicked);
+
+		const described = describe(edges);
+		assert.ok(described.includes('app/api/login.ts > app/db x1'));
+		assert.ok(described.includes('app/api > app/db x1'));
+		// login.ts's other arrows merge back into api
+		assert.ok(!described.includes('app/api/login.ts > scripts x1'));
+	});
+
 	test('keeping a box no deeper than the depth changes nothing', () => {
 		const { info, state, rects } = makeApp();
 

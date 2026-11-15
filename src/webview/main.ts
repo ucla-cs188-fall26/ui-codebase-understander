@@ -426,15 +426,13 @@ function drawGraph(): void {
 		world.appendChild(makeStrip(strip, (boxZ.get(strip.ownerId) ?? 0) + 1));
 	}
 
-	// the selected box's arrows, and the selected arrow's ends, aren't merged into the folders around them
+	// the selected box's arrows aren't merged into the folders around them
 	const kept: string[] = [];
 	if (selectedId !== undefined) {
 		kept.push(selectedId);
 	}
-	if (selectedEdge !== undefined) {
-		kept.push(nodeOfEnd(selectedEdge.from), nodeOfEnd(selectedEdge.to));
-	}
-	const edges = visibleEdges(state, info, rects, strips, arrowDepth, kept);
+	// the selected arrow stays as it was clicked, without splitting out any other arrow
+	const edges = visibleEdges(state, info, rects, strips, arrowDepth, kept, selectedEdge);
 	lastEdges = edges;
 	const arrows = placeArrows(edges, arrowRects);
 
@@ -617,7 +615,7 @@ let state: LayoutState = createLayoutState();
 
 // the node whose details the sidebar shows, or undefined when nothing is selected
 let selectedId: string | undefined = undefined;
-let selectedEdge: Edge | undefined = undefined;
+let selectedEdge: VisibleEdge | undefined = undefined;
 let flowView: FlowGraphMessage | undefined;
 
 // every box drawn last time, so Fit to view can measure what's on screen
