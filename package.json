@@ -14,10 +14,58 @@
   "contributes": {
     "commands": [
       {
-        "command": "codeflow-visualizer.helloWorld",
-        "title": "Hello World"
+        "command": "codeflow-visualizer.openGraph",
+        "title": "Open Graph",
+        "category": "Codeflow",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "codeflow-visualizer.resetLayout",
+        "title": "Reset Layout",
+        "category": "Codeflow",
+        "icon": "$(discard)"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Codeflow",
+      "properties": {
+        "codeflow.folderColor": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Folders' accent: the bar down their left edge and the tint in their title. Any CSS color, like `#4ea1ff`. Empty follows the theme."
+        },
+        "codeflow.fileColor": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "A bar down files' left edge, like folders have. Any CSS color. Empty means no bar."
+        },
+        "codeflow.arrowColor": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Arrows and their heads. Any CSS color. Empty follows the theme."
+        },
+        "codeflow.highlightColor": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "The selected box's border and the selected arrow. Any CSS color. Empty follows the theme."
+        }
+      }
+    },
+    "menus": {
+      "editor/title": [
+        {
+          "command": "codeflow-visualizer.openGraph",
+          "when": "activeWebviewPanelId != 'codeflowGraph'",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "codeflow-visualizer.resetLayout",
+          "when": "activeWebviewPanelId == 'codeflowGraph'"
+        }
+      ]
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run package",
@@ -31,19 +79,20 @@
     "pretest": "npm run compile-tests && npm run compile && npm run lint",
     "check-types": "tsc --noEmit",
     "lint": "eslint src",
-    "test": "vscode-test"
+    "test": "vscode-test",
+    "test:unit": "tsc -p . --outDir out && mocha --ui tdd out/test/graph.test.js"
   },
   "devDependencies": {
-    "@types/vscode": "^1.144.0",
     "@types/mocha": "^10.0.10",
     "@types/node": "24.x",
-    "typescript-eslint": "^8.61.1",
-    "eslint": "^10.5.0",
+    "@types/vscode": "^1.144.0",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^3.0.0",
     "esbuild": "^0.28.1",
+    "eslint": "^10.5.0",
     "npm-run-all": "^4.1.5",
     "typescript": "^6.0.3",
-    "@vscode/test-cli": "^0.0.15",
-    "@vscode/test-electron": "^3.0.0"
+    "typescript-eslint": "^8.61.1"
   },
   "overrides": {
     "diff": "^8.0.4",
