@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { posix } from 'path';
 import { buildEdges, buildTree } from '../graph/build';
-import { CODE_EXTENSIONS, scanImports } from '../graph/imports';
+import { CODE_EXTENSIONS, FoundImport, scanImports } from '../graph/imports';
 import { Graph } from '../graph/types';
 
 // directories that are generated or installed rather than written by hand
@@ -17,7 +17,7 @@ export async function loadGraph(workspaceFolder: vscode.WorkspaceFolder): Promis
 	const uris = await vscode.workspace.findFiles(pattern, EXCLUDE_GLOB);
 
 	const decoder = new TextDecoder();
-	const importsByFile = new Map<string, string[]>();
+	const importsByFile = new Map<string, FoundImport[]>();
 	for (const uri of uris) {
 		// repo-relative path with forward slashes, like src/graph/build.ts
 		const path = vscode.workspace.asRelativePath(uri, false);

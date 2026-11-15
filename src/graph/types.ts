@@ -12,10 +12,17 @@ export interface Node {
 	childCount: number; // computed at build
 }
 
+// lines in a file, 1-based and inclusive: an import is one line, and a function later will span several
+export interface LineRange {
+	start: number;
+	end: number;
+}
+
 export interface Edge {
 	from: string; // node id
 	to: string;
 	kind: EdgeKind;
+	lines?: LineRange; // where in the importing file it's written; missing on edges made by grouping
 }
 
 export interface Graph {

@@ -192,8 +192,22 @@ export async function openGraphPanel(context: vscode.ExtensionContext): Promise<
 		if (message.type === 'open') {
 			const uri = vscode.Uri.joinPath(workspaceUri, message.path);
 			if (message.kind === 'file') {
-				// beside the graph, so the graph stays in view
-				await vscode.window.showTextDocument(uri, { viewColumn: vscode.ViewColumn.Beside });
+				// the lines asked for, if any: selected from the start of the first to the end of the last, so they're
+				// highlighted
+				let selection: vscode.Range | undefined = undefined;
+				if (message.lines !== undefined) {
+					selection = new vscode.Range(message.lines.start - 1, 0, message.lines.end, 0);
+				}
+				// in a group the graph isn't in, so the graph stays in view: one that's already open if there is one,
+				// so each file opens as a tab there instead of splitting the window again; otherwise a new one beside
+				const editor = await vscode.window.showTextDocument(uri, { viewColumn: otherColumn(panel), selection: selection });
+				if (message.lines !== undefined && selection !== undefined) {
+					// a short range centers; a long one, like a big function later, starts at the top so its beginning
+					// shows
+					const short = message.lines.end - message.lines.start < 20;
+					const reveal = short ? vscode.TextEditorRevealType.InCenter : vscode.TextEditorRevealType.AtTop;
+					editor.revealRange(selection, reveal);
+				}
 			} else {
 				await vscode.commands.executeCommand('revealInExplorer', uri);
 			}
@@ -276,6 +290,27 @@ async function openFlowPanel(context: vscode.ExtensionContext, workspaceFolder: 
 			await vscode.window.showTextDocument(uri, { viewColumn: vscode.ViewColumn.Beside });
 		}
 	}, undefined, context.subscriptions);
+}
+
+/**
+ * Picks where to open a file so the graph stays in view: the open group next to the graph's (to its right if there
+ * is one, else to its left), or a new group beside the graph if it's the only one.
+ * @param panel The graph's panel.
+ * @returns The column to open in.
+ */
+function otherColumn(panel: vscode.WebviewPanel): vscode.ViewColumn {
+	const graphColumn = panel.viewColumn ?? vscode.ViewColumn.One;
+	let right: vscode.ViewColumn | undefined = undefined;
+	let left: vscode.ViewColumn | undefined = undefined;
+	for (const group of vscode.window.tabGroups.all) {
+		if (group.viewColumn > graphColumn && (right === undefined || group.viewColumn < right)) {
+			right = group.viewColumn;
+		}
+		if (group.viewColumn < graphColumn && (left === undefined || group.viewColumn > left)) {
+			left = group.viewColumn;
+		}
+	}
+	return right ?? left ?? vscode.ViewColumn.Beside;
 }
 
 function modelKey(model: Pick<ModelOption, 'vendor' | 'id'>): string {
@@ -472,6 +507,13 @@ function buildHtml(scriptUri: vscode.Uri): string {
 			fill: none;
 			stroke: currentColor;
 			stroke-width: 1.5;
+		}
+		/* the triangle: filled, with a stroke of the same color whose round joins round off its corners */
+		.resize-handle svg .icon-fill {
+			fill: currentColor;
+			stroke: currentColor;
+			stroke-width: 2;
+			stroke-linejoin: round;
 		}
 		#world {
 			position: relative;

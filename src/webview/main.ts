@@ -1,4 +1,4 @@
-import { Edge, Node, NodeKind, ROOT_ID } from '../graph/types';
+import { Edge, LineRange, Node, NodeKind, ROOT_ID } from '../graph/types';
 import { ExtensionToWebview, FlowGraphMessage, FlowScenario, ModelOption, WebviewToExtension } from '../messages';
 import { connections, isInside } from '../analysis/edges';
 import { getLineage } from '../analysis/lookups';
@@ -426,7 +426,15 @@ function drawGraph(): void {
 		world.appendChild(makeStrip(strip, (boxZ.get(strip.ownerId) ?? 0) + 1));
 	}
 
-	const edges = visibleEdges(state, info, rects, strips, arrowDepth);
+	// the selected box's arrows, and the selected arrow's ends, aren't merged into the folders around them
+	const kept: string[] = [];
+	if (selectedId !== undefined) {
+		kept.push(selectedId);
+	}
+	if (selectedEdge !== undefined) {
+		kept.push(nodeOfEnd(selectedEdge.from), nodeOfEnd(selectedEdge.to));
+	}
+	const edges = visibleEdges(state, info, rects, strips, arrowDepth, kept);
 	lastEdges = edges;
 	const arrows = placeArrows(edges, arrowRects);
 
@@ -675,9 +683,28 @@ function drawSidebar(): void {
 	}
 	addDetail(sidebar, 'Times imported', String(info.indegrees.get(selectedId!)));
 
+	// where each row's open button goes: to the import line, in whichever file writes it. A file in "Imported by"
+	// opens at its line importing this box; a file in "Imports" opens this file at its line importing it, which only
+	// makes sense when this box is a file, since a folder's imports are spread across its files
+	const importsAt = new Map<string, OpenAt>();
+	const importedByAt = new Map<string, OpenAt>();
+	for (const edge of info.edges) {
+		if (edge.lines === undefined) {
+			continue;
+		}
+		const fromInside = isInside(edge.from, selectedId!, info.nodesById);
+		const toInside = isInside(edge.to, selectedId!, info.nodesById);
+		if (toInside && !fromInside && !importedByAt.has(edge.from)) {
+			importedByAt.set(edge.from, { path: edge.from, lines: edge.lines });
+		}
+		if (node.kind === 'file' && edge.from === selectedId && !importsAt.has(edge.to)) {
+			importsAt.set(edge.to, { path: edge.from, lines: edge.lines });
+		}
+	}
+
 	const linked = connections(selectedId!, info.edges, info.nodesById);
-	addConnectionList(sidebar, 'Imports', groupLinks(selectedId!, linked.outgoing, info, arrowDepth));
-	addConnectionList(sidebar, 'Imported by', groupLinks(selectedId!, linked.incoming, info, arrowDepth));
+	addConnectionList(sidebar, 'Imports', groupLinks(selectedId!, linked.outgoing, info, arrowDepth), undefined, importsAt);
+	addConnectionList(sidebar, 'Imported by', groupLinks(selectedId!, linked.incoming, info, arrowDepth), undefined, importedByAt);
 
 	sidebar.classList.add('visible');
 }
@@ -714,6 +741,15 @@ function drawEdgeSidebar(sidebar: HTMLElement, selected: Edge): void {
 		toCounts.set(edge.to, (toCounts.get(edge.to) ?? 0) + 1);
 	}
 
+	// where each importing file writes its import, so its open button goes there; edges come in the order they're
+	// written, so the first one seen is a file's first import to the other end
+	const fromLines = new Map<string, OpenAt>();
+	for (const edge of represented) {
+		if (edge.lines !== undefined && !fromLines.has(edge.from)) {
+			fromLines.set(edge.from, { path: edge.from, lines: edge.lines });
+		}
+	}
+
 	// the header: the two ends
 	const title = document.createDocumentFragment();
 	title.appendChild(makeEndLabel(selected.from, endName(selected.from)));
@@ -731,7 +767,7 @@ function drawEdgeSidebar(sidebar: HTMLElement, selected: Edge): void {
 	// section headings are plain, so a hidden end just says so in words
 	const fromBox = nodeOfEnd(selected.from);
 	const toBox = nodeOfEnd(selected.to);
-	addConnectionList(sidebar, 'From ' + hiddenPrefix(selected.from) + endName(selected.from), groupInside(fromBox, fromCounts, info!), fromBox);
+	addConnectionList(sidebar, 'From ' + hiddenPrefix(selected.from) + endName(selected.from), groupInside(fromBox, fromCounts, info!), fromBox, fromLines);
 	addConnectionList(sidebar, 'To ' + hiddenPrefix(selected.to) + endName(selected.to), groupInside(toBox, toCounts, info!), toBox);
 	sidebar.classList.add('visible');
 }
@@ -891,18 +927,36 @@ function pathWithBreaks(path: string): DocumentFragment {
 	return fragment;
 }
 
+// where a sidebar row's open button goes: a file, and the lines to select in it
+interface OpenAt {
+	path: string;
+	lines: LineRange;
+}
+
 /**
  * Makes a button that opens a file in the editor, or shows a directory in the Explorer.
  * @param path The node's repo-relative path.
  * @param kind The node's kind, which decides what opening means.
+ * @param openAt A file and lines to open instead, like an import line, which may be in another file; left out, the
+ *   node opens, at the top for a file.
  * @returns The button.
  */
-function makeOpenButton(path: string, kind: NodeKind): HTMLButtonElement {
+function makeOpenButton(path: string, kind: NodeKind, openAt?: OpenAt): HTMLButtonElement {
 	const button = document.createElement('button');
 	button.className = 'icon-button';
 	button.title = kind === 'file' ? 'Open in editor' : 'Show in Explorer';
 	button.dataset.path = path;
 	button.dataset.kind = kind;
+	if (openAt !== undefined) {
+		const lines = openAt.lines;
+		const fileName = openAt.path.slice(openAt.path.lastIndexOf('/') + 1);
+		const where = lines.start === lines.end ? 'line ' + lines.start : 'lines ' + lines.start + '–' + lines.end;
+		button.title = 'Open ' + fileName + ' at ' + where;
+		button.dataset.path = openAt.path;
+		button.dataset.kind = 'file';
+		button.dataset.lineStart = String(lines.start);
+		button.dataset.lineEnd = String(lines.end);
+	}
 	button.appendChild(makeOpenIcon());
 	button.addEventListener('click', handleOpenClick);
 	return button;
@@ -917,7 +971,11 @@ function handleOpenClick(event: MouseEvent): void {
 	event.stopPropagation();
 
 	const button = event.currentTarget as HTMLElement;
-	vscode.postMessage({ type: 'open', path: button.dataset.path!, kind: button.dataset.kind as NodeKind });
+	let lines: LineRange | undefined = undefined;
+	if (button.dataset.lineStart !== undefined) {
+		lines = { start: Number(button.dataset.lineStart), end: Number(button.dataset.lineEnd) };
+	}
+	vscode.postMessage({ type: 'open', path: button.dataset.path!, kind: button.dataset.kind as NodeKind, lines: lines });
 }
 
 // which rows in the sidebar's lists are open, as the list's title and the row's id; forgotten when the selection changes
@@ -934,8 +992,10 @@ let openLinkRowsFor: string | undefined = undefined;
  * @param groups The rows, from groupLinks or groupInside.
  * @param relativeTo A box whose rows these are inside, so top rows show their path from it; leave it out for full
  *   paths.
+ * @param lines Where some rows' open buttons go instead, by row id, like an import line; rows left out open their own
+ *   node.
  */
-function addConnectionList(sidebar: HTMLElement, title: string, groups: LinkGroup[], relativeTo?: string): void {
+function addConnectionList(sidebar: HTMLElement, title: string, groups: LinkGroup[], relativeTo?: string, lines?: Map<string, OpenAt>): void {
 	const heading = document.createElement('div');
 	heading.className = 'sidebar-section';
 	heading.textContent = title;
@@ -961,7 +1021,7 @@ function addConnectionList(sidebar: HTMLElement, title: string, groups: LinkGrou
 		for (const row of rows) {
 			const key = title + '\n' + row.id;
 			const text = level === 0 ? topRowText(row.id) : info!.nodesById.get(row.id)!.name;
-			sidebar.appendChild(makeLinkRow(row, text, level, key));
+			sidebar.appendChild(makeLinkRow(row, text, level, key, lines?.get(row.id)));
 			if (openLinkRows.has(key)) {
 				addRows(row.children, level + 1);
 			}
@@ -977,9 +1037,10 @@ function addConnectionList(sidebar: HTMLElement, title: string, groups: LinkGrou
  * @param text What the row says.
  * @param level How deep it sits in the list, for its indent.
  * @param key Which row it is, for remembering whether it's open.
+ * @param openAt Where its open button goes instead, like an import line; left out, it opens the row's node.
  * @returns The row.
  */
-function makeLinkRow(row: LinkGroup, text: string, level: number, key: string): HTMLElement {
+function makeLinkRow(row: LinkGroup, text: string, level: number, key: string, openAt?: OpenAt): HTMLElement {
 	const link = document.createElement('div');
 	link.className = 'sidebar-link';
 	link.style.paddingLeft = (level * 16) + 'px';
@@ -1017,7 +1078,7 @@ function makeLinkRow(row: LinkGroup, text: string, level: number, key: string): 
 	link.appendChild(count);
 
 	const node = info!.nodesById.get(row.id)!;
-	link.appendChild(makeOpenButton(node.path, node.kind));
+	link.appendChild(makeOpenButton(node.path, node.kind, openAt));
 
 	return link;
 }

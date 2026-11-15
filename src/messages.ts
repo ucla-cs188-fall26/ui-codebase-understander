@@ -1,4 +1,4 @@
-import { Graph, NodeKind } from './graph/types';
+import { Graph, LineRange, NodeKind } from './graph/types';
 import { SavedLayout } from './layout/saved';
 
 // sent by the webview once its script has loaded and can receive messages
@@ -11,6 +11,7 @@ export interface OpenMessage {
 	type: 'open';
 	path: string; // repo-relative, like the node's path
 	kind: NodeKind; // so the extension knows whether to open or reveal without checking the disk
+	lines?: LineRange; // for a file, the lines to select and bring into view
 }
 
 // sent by the webview after the layout or camera changes, to be stored for next time

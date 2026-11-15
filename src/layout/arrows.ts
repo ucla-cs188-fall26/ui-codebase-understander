@@ -1,5 +1,5 @@
 import { Edge } from '../graph/types';
-import { Position, Rect } from './geometry';
+import { boundsOf, Position, Rect } from './geometry';
 
 export type Side = 'left' | 'right' | 'top' | 'bottom';
 
@@ -75,11 +75,11 @@ const END_GAP = 4;
 
 // one end of an arrow, waiting for its spot along a side
 interface WaitingEnd {
-	arrowIndex: number;
+	arrowIndices: number[]; // the arrows it's the end of: one for a head, every arrow leaving that side for a start
 	isStart: boolean;
-	other: Rect; // the arrow's other box, which decides where this end would like to be
+	other: Rect; // the arrows' other boxes, together, which decide where this end would like to be
 	preferred: number; // where along the side this end would like to be
-	size: number; // how much room it takes along the side: its line's width, or its head's for the end it points into
+	size: number; // how much room it takes along the side: its widest line, or its head for the end it points into
 }
 
 // every end waiting on one side of one box
@@ -245,6 +245,50 @@ function spotsAlongSide(ends: WaitingEnd[], rect: Rect, side: Side): number[] {
 }
 
 /**
+ * Turns all the arrow starts on one side into a single end they share, so arrows leaving a box together come out of
+ * one point and split on their way; heads stay apart, so each arrow's head can still be told apart. The shared end
+ * would like to be in the middle of where they'd each like to be, and takes as much room as the widest of them.
+ * @param group One side's ends.
+ * @returns The side's ends, with its starts as one.
+ */
+function shareStarts(group: SideGroup): WaitingEnd[] {
+	const starts: WaitingEnd[] = [];
+	const heads: WaitingEnd[] = [];
+	for (const end of group.ends) {
+		if (end.isStart) {
+			starts.push(end);
+		} else {
+			heads.push(end);
+		}
+	}
+	if (starts.length < 2) {
+		return group.ends;
+	}
+
+	let preferredTotal = 0;
+	let size = 0;
+	const arrowIndices: number[] = [];
+	const others: Rect[] = [];
+	for (const start of starts) {
+		preferredTotal += start.preferred;
+		size = Math.max(size, start.size);
+		for (const index of start.arrowIndices) {
+			arrowIndices.push(index);
+		}
+		others.push(start.other);
+	}
+	const shared: WaitingEnd = {
+		arrowIndices: arrowIndices,
+		isStart: true,
+		other: boundsOf(others)!,
+		preferred: preferredTotal / starts.length,
+		size: size,
+	};
+	heads.push(shared);
+	return heads;
+}
+
+/**
  * Finds a point on one side of a box, at a spot along it.
  * @param rect The box.
  * @param side Which side.
@@ -309,14 +353,14 @@ export function placeArrows(edges: (Edge & { count?: number })[], rects: Map<str
 		});
 
 		const start: WaitingEnd = {
-			arrowIndex: i,
+			arrowIndices: [i],
 			isStart: true,
 			other: toRect,
 			preferred: preferredSpot(fromRect, sides.fromSide, toRect),
 			size: width,
 		};
 		const end: WaitingEnd = {
-			arrowIndex: i,
+			arrowIndices: [i],
 			isStart: false,
 			other: fromRect,
 			preferred: preferredSpot(toRect, sides.toSide, fromRect),
@@ -326,6 +370,11 @@ export function placeArrows(edges: (Edge & { count?: number })[], rects: Map<str
 		groupFor(edge.to, sides.toSide).ends.push(end);
 		boxOfEnd.set(start, edge.from);
 		boxOfEnd.set(end, edge.to);
+	}
+
+	// arrows leaving a side together share one start, which is placed like any other end from here on
+	for (const group of groups.values()) {
+		group.ends = shareStarts(group);
 	}
 
 	// crowded sides spill onto the sides next to them. Every side decides from the ends it started with, and the moves
@@ -363,11 +412,12 @@ export function placeArrows(edges: (Edge & { count?: number })[], rects: Map<str
 		const group = groupFor(move.boxId, move.side);
 		move.end.preferred = preferredSpot(group.rect, move.side, move.end.other);
 		group.ends.push(move.end);
-		const arrow = arrows[move.end.arrowIndex];
-		if (move.end.isStart) {
-			arrow.startSide = move.side;
-		} else {
-			arrow.endSide = move.side;
+		for (const index of move.end.arrowIndices) {
+			if (move.end.isStart) {
+				arrows[index].startSide = move.side;
+			} else {
+				arrows[index].endSide = move.side;
+			}
 		}
 	}
 
@@ -375,12 +425,14 @@ export function placeArrows(edges: (Edge & { count?: number })[], rects: Map<str
 		const ends = sortAlongSide(group.ends, group.side);
 		const spots = spotsAlongSide(ends, group.rect, group.side);
 		for (let i = 0; i < ends.length; i++) {
-			const point = pointAt(group.rect, group.side, spots[i]);
-			const arrow = arrows[ends[i].arrowIndex];
-			if (ends[i].isStart) {
-				arrow.start = point;
-			} else {
-				arrow.end = point;
+			for (const index of ends[i].arrowIndices) {
+				// each arrow gets its own copy, so changing one never moves another
+				const point = pointAt(group.rect, group.side, spots[i]);
+				if (ends[i].isStart) {
+					arrows[index].start = point;
+				} else {
+					arrows[index].end = point;
+				}
 			}
 		}
 	}

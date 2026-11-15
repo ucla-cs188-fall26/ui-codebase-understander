@@ -71,11 +71,13 @@ export function makeGripIcon(): SVGSVGElement {
 }
 
 /**
- * Draws two short diagonal lines in the bottom-right corner, the usual sign for "drag this corner to resize".
+ * Draws a small solid triangle tucked into the bottom-right corner, the sign for "drag this corner to resize". Its
+ * outer corner is an arc around the same center as the box's rounded corner (radius 7 inside the border, centered
+ * at 9, 9), so it keeps an even gap from the box's edge all the way around.
  * @returns The icon.
  */
 export function makeResizeIcon(): SVGSVGElement {
-	return makeIcon('M 14 8 L 8 14 M 14 12 L 12 14');
+	return makeIcon('', 'M 13 6 L 13 9 A 4 4 0 0 1 9 13 L 6 13 Z');
 }
 
 /**

@@ -163,10 +163,12 @@ function commonAncestor(a: string, b: string, info: GraphInfo): string {
  * @param info The graph lookups.
  * @param rects Every visible box, from placeBoxes.
  * @param strips Every strip, from placeStrips.
+ * @param kept Boxes whose arrows aren't merged into the folders around them: an end inside one is lifted no higher
+ *   than it.
  * @returns A function giving an edge's two ends (each a box's or strip's id), grouped so neither is more than maxDepth
  *   levels below the folder the edge lives in (Infinity for no limit), or undefined if either can't be shown at all.
  */
-function makeArrowEndFinder(state: LayoutState, info: GraphInfo, rects: Map<string, Rect>, strips: Strip[]): (edge: Edge, maxDepth: number) => { from: string; to: string } | undefined {
+function makeArrowEndFinder(state: LayoutState, info: GraphInfo, rects: Map<string, Rect>, strips: Strip[], kept: string[]): (edge: Edge, maxDepth: number) => { from: string; to: string } | undefined {
 	// which strip hides each hidden child; a child has one parent, so it's behind one strip at most
 	const stripOfChild = new Map<string, string>();
 	for (const strip of strips) {
@@ -235,6 +237,17 @@ function makeArrowEndFinder(state: LayoutState, info: GraphInfo, rects: Map<stri
 		return ancestorAt(nodeOfEnd(end), depth);
 	}
 
+	// the deepest kept box holding an end, if any: the end is lifted no higher than it
+	function keptDepth(end: string): number {
+		let deepest = 0;
+		for (const id of kept) {
+			if (isInside(nodeOfEnd(end), id, info.nodesById)) {
+				deepest = Math.max(deepest, depthOf(id));
+			}
+		}
+		return deepest;
+	}
+
 	return function arrowEnds(edge: Edge, maxDepth: number): { from: string; to: string } | undefined {
 		const from = endpointOf(edge.from);
 		const to = endpointOf(edge.to);
@@ -243,14 +256,18 @@ function makeArrowEndFinder(state: LayoutState, info: GraphInfo, rects: Map<stri
 		}
 
 		// the folder the edge lives in is at least the root, so ends no deeper than maxDepth are always within the
-		// limit, and the folder isn't needed. With no limit (Infinity), that's every end
+		// limit, and the folder isn't needed. With no limit (Infinity), that's every end. Kept boxes only ever let ends
+		// go deeper, so they don't change this
 		if (endDepth(from) <= maxDepth && endDepth(to) <= maxDepth) {
 			return { from: from, to: to };
 		}
 
 		// otherwise the ends may go maxDepth below that folder
 		const limit = depthOf(commonAncestor(edge.from, edge.to, info)) + maxDepth;
-		return { from: endAtDepth(from, limit), to: endAtDepth(to, limit) };
+		return {
+			from: endAtDepth(from, Math.max(limit, keptDepth(from))),
+			to: endAtDepth(to, Math.max(limit, keptDepth(to))),
+		};
 	};
 }
 
@@ -365,13 +382,15 @@ export interface VisibleEdge extends Edge {
  * @param strips Every strip, from placeStrips. Without them, edges to hidden nodes are left out.
  * @param maxDepth How many levels below the folder an edge lives in its ends may go, from the toolbar; deeper ends
  *   attach to their folder at that level. Infinity for no limit.
+ * @param kept Boxes whose arrows start from the box itself even when the depth would merge them into a folder around
+ *   it, like the selected box; their other ends still follow the depth.
  * @returns One edge per pair of ends with an edge between them, in the order first seen, each with the graph's edges
  *   that landed on it.
  */
-export function visibleEdges(state: LayoutState, info: GraphInfo, rects: Map<string, Rect>, strips: Strip[] = [], maxDepth: number = Infinity): VisibleEdge[] {
+export function visibleEdges(state: LayoutState, info: GraphInfo, rects: Map<string, Rect>, strips: Strip[] = [], maxDepth: number = Infinity, kept: string[] = []): VisibleEdge[] {
 	// one per pair of ends, in the order first seen, counting the edges that land on it
 	const byEnds = new Map<string, VisibleEdge>();
-	const arrowEnds = makeArrowEndFinder(state, info, rects, strips);
+	const arrowEnds = makeArrowEndFinder(state, info, rects, strips, kept);
 
 	for (const edge of info.edges) {
 		const ends = arrowEnds(edge, maxDepth);

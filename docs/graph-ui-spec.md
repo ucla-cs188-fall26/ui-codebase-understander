@@ -90,12 +90,14 @@ Each rule should become a test.
 - Each end of an arrow curves out of its side by half of how far the arrow travels that way, so an arrow leaving from a side next to the one facing its target bends out a little and turns, instead of looping far out.
 - An arrow's end goes where it points: straight across where its two boxes overlap, or else the point on the side nearest the other box, kept clear of the corners.
 - Ends sharing a side are nudged apart just enough not to overlap (room for each line or head, plus a small gap), keeping their order so they don't cross at the box. A side too crowded for that moves its outermost ends to the sides next to it, the ones whose other boxes lie furthest that way first; a side still too crowded spreads its ends evenly.
+- Arrows leaving the same side of a box start from one shared point, in the middle of where they'd each start, and split on their way; their heads stay apart.
 - An arrow goes under every box, except the boxes at its ends and the open directories holding them. Its siblings' boxes and theirs count, however they're painted.
 - Near a box it goes under, an arrow fades out first, so it doesn't look like it starts or ends there.
 - Arrows to hidden boxes attach to the strip for that side.
 - Selecting a box draws its arrows (either end is the box or inside it) in full. The arrow settings' strength decides the rest: Hidden draws none, Default draws them faint, and Full draws them in full. The setting is saved with the layout.
 - An arrow standing for several imports is thicker, growing slower as the count rises, up to a limit. Hovering it shows the count.
 - An arrow lives in the deepest folder holding both its ends. The arrow settings' depth (default 1, typed or stepped from 1 up to the repo's deepest level, where nothing is grouped) lets each end go at most that many levels below that folder; deeper ends attach to their folder at that level, and arrows landing on the same two boxes merge. A value below 1 becomes 1, and one above the deepest level becomes that level. The deepest level shows dimmed beside it.
+- A selected box's arrows start from the box itself, even when the depth setting would merge them into a folder around it; their other ends still follow the setting. A selected arrow keeps its ends the same way, so it stays put while selected.
 - A selected box's arrows are the ones carrying any of its imports, wherever they're drawn, so a file's grouped arrows still light up.
 - A selected arrow keeps its width and turns yellow, its tip included.
 - An arrow's line stops at its head, and thicker arrows get bigger heads, so the line never shows past the tip.

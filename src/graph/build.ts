@@ -1,4 +1,5 @@
 import { posix } from 'path';
+import { FoundImport } from './imports';
 import { resolveImport } from './resolve';
 import { Edge, Node, ROOT_ID } from './types';
 
@@ -46,10 +47,11 @@ export function buildTree(repoName: string, paths: string[]): Node[] {
 
 /**
  * Turns each file's raw import paths into edges between repo files.
- * @param importsByFile Every repo file, mapped to the import paths written in it.
- * @returns One edge per file-to-file import. Packages get no edge.
+ * @param importsByFile Every repo file, mapped to the imports written in it, from scanImports.
+ * @returns One edge per file-to-file import, carrying the lines of the first import of that file. Packages get no
+ *   edge.
  */
-export function buildEdges(importsByFile: Map<string, string[]>): Edge[] {
+export function buildEdges(importsByFile: Map<string, FoundImport[]>): Edge[] {
 	const files = new Set(importsByFile.keys());
 	const sortedFiles = Array.from(files).toSorted();
 
@@ -57,8 +59,8 @@ export function buildEdges(importsByFile: Map<string, string[]>): Edge[] {
 	for (const fromFile of sortedFiles) {
 		const importPaths = importsByFile.get(fromFile)!;
 		const connectedFiles = new Set<string>();
-		for (const importPath of importPaths) {
-			const toFile = resolveImport(importPath, fromFile, files);
+		for (const found of importPaths) {
+			const toFile = resolveImport(found.path, fromFile, files);
 
 			// skip packages, self-imports, and repeat imports of the same file
 			if (toFile === undefined || toFile === fromFile || connectedFiles.has(toFile)) {
@@ -66,7 +68,7 @@ export function buildEdges(importsByFile: Map<string, string[]>): Edge[] {
 			}
 
 			connectedFiles.add(toFile);
-			edges.push({ from: fromFile, to: toFile, kind: 'import' });
+			edges.push({ from: fromFile, to: toFile, kind: 'import', lines: found.lines });
 		}
 	}
 

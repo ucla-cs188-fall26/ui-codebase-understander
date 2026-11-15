@@ -1,6 +1,6 @@
 import * as assert from 'assert';
 import { buildEdges, buildTree } from '../graph/build';
-import { scanImports } from '../graph/imports';
+import { FoundImport, scanImports } from '../graph/imports';
 import { indexChildren, indexNodes } from '../analysis/lookups';
 import { computeIndegrees, sortChildren } from '../analysis/metrics';
 import { connections, findChildContaining, liftEdges } from '../analysis/edges';
@@ -38,17 +38,22 @@ suite('buildTree', () => {
 
 suite('buildEdges', () => {
 	test('keeps one edge per file pair and skips self-imports and packages', () => {
-		const importsByFile = new Map<string, string[]>([
+		// each import on its own line, numbered in order
+		function onLines(paths: string[]): FoundImport[] {
+			return paths.map((path, index) => ({ path: path, lines: { start: index + 1, end: index + 1 } }));
+		}
+		const importsByFile = new Map<string, FoundImport[]>([
 			['README.md', []],
-			['src/app.ts', ['./lib/b', './lib/b.js', './app', 'react']],
-			['src/lib/b.ts', ['../../README.md']],
+			['src/app.ts', onLines(['./lib/b', './lib/b.js', './app', 'react'])],
+			['src/lib/b.ts', onLines(['../../README.md'])],
 		]);
 
 		const edges = buildEdges(importsByFile);
 
+		// the repeat import of b keeps the first one's line
 		assert.deepStrictEqual(edges, [
-			{ from: 'src/app.ts', to: 'src/lib/b.ts', kind: 'import' },
-			{ from: 'src/lib/b.ts', to: 'README.md', kind: 'import' },
+			{ from: 'src/app.ts', to: 'src/lib/b.ts', kind: 'import', lines: { start: 1, end: 1 } },
+			{ from: 'src/lib/b.ts', to: 'README.md', kind: 'import', lines: { start: 1, end: 1 } },
 		]);
 	});
 });
@@ -106,7 +111,24 @@ suite('scanImports', () => {
 
 		const imports = scanImports(source);
 
-		assert.deepStrictEqual(imports, ['./a', './b']);
+		assert.deepStrictEqual(imports, [
+			{ path: './a', lines: { start: 2, end: 2 } },
+			{ path: './b', lines: { start: 4, end: 4 } },
+		]);
+	});
+
+	test('gives an import written across lines the line its path is on', () => {
+		const source = [
+			'const x = 1;',
+			'const {',
+			'  a,',
+			'  b,',
+			"} = require('./x');",
+		].join('\n');
+
+		const imports = scanImports(source);
+
+		assert.deepStrictEqual(imports, [{ path: './x', lines: { start: 5, end: 5 } }]);
 	});
 });
 
@@ -455,6 +477,40 @@ suite('placeArrows', () => {
 		for (let i = 1; i < spots.length; i++) {
 			assert.ok(spots[i] - spots[i - 1] >= 9 + 4 - 0.001);
 		}
+	});
+
+	test('arrows leaving one side of a box share a start point, and their heads stay apart', () => {
+		// one source on the left, three targets to its right at different heights
+		const rects = new Map([
+			['source', { x: 0, y: 100, width: 100, height: 60 }],
+			['high', { x: 300, y: 0, width: 100, height: 40 }],
+			['middle', { x: 300, y: 110, width: 100, height: 40 }],
+			['low', { x: 300, y: 220, width: 100, height: 40 }],
+		]);
+
+		const arrows = placeArrows([edge('source', 'high'), edge('source', 'middle'), edge('source', 'low')], rects);
+
+		for (const arrow of arrows) {
+			assert.strictEqual(arrow.startSide, 'right');
+			assert.deepStrictEqual(arrow.start, arrows[0].start);
+		}
+		assert.notDeepStrictEqual(arrows[0].end, arrows[1].end);
+		assert.notDeepStrictEqual(arrows[1].end, arrows[2].end);
+	});
+
+	test('a shared start and a head coming into the same side sit apart', () => {
+		// a sends two arrows right and gets one back from b, all on its right side
+		const rects = new Map([
+			['a', { x: 0, y: 0, width: 100, height: 100 }],
+			['b', { x: 300, y: 0, width: 100, height: 100 }],
+			['c', { x: 300, y: 30, width: 100, height: 40 }],
+		]);
+
+		const arrows = placeArrows([edge('a', 'b'), edge('a', 'c'), edge('b', 'a')], rects);
+
+		assert.deepStrictEqual(arrows[0].start, arrows[1].start);
+		assert.strictEqual(arrows[2].endSide, 'right');
+		assert.ok(Math.abs(arrows[2].end.y - arrows[0].start.y) >= 9 / 2 + 1.5 / 2 + 4 - 0.001);
 	});
 
 	test('spills a crowded side\'s outermost ends onto the sides next to it', () => {
@@ -2036,6 +2092,34 @@ suite('arrow depth', () => {
 		}
 		return described;
 	}
+
+	test('a kept file gets its own arrow while its sibling\'s import stays merged into their folder', () => {
+		const { info, state, rects } = makeApp();
+
+		const edges = visibleEdges(state, info, rects, [], 1, ['app/api/login.ts']);
+
+		const described = describe(edges);
+		assert.ok(described.includes('app/api/login.ts > app/db x1'));
+		assert.ok(described.includes('app/api > app/db x1'));
+	});
+
+	test('a kept file\'s arrows still group their other end at the depth', () => {
+		const { info, state, rects } = makeApp();
+
+		const edges = visibleEdges(state, info, rects, [], 1, ['app/api/login.ts']);
+
+		// seed.ts sits in scripts, one level below the root the arrow lives in
+		assert.ok(describe(edges).includes('app/api/login.ts > scripts x1'));
+	});
+
+	test('keeping a box no deeper than the depth changes nothing', () => {
+		const { info, state, rects } = makeApp();
+
+		const kept = visibleEdges(state, info, rects, [], 1, ['app']);
+		const plain = visibleEdges(state, info, rects, [], 1);
+
+		assert.deepStrictEqual(describe(kept), describe(plain));
+	});
 
 	test('at depth 1, each arrow joins the outermost boxes that differ, and arrows on the same two boxes merge', () => {
 		const { info, state, rects } = makeApp();
