@@ -1144,10 +1144,14 @@ function buildHtml(scriptUri: vscode.Uri): string {
 		/* opens or closes a folder row in the import lists; an empty spot on file rows keeps names lined up */
 		.sidebar-toggle {
 			flex-shrink: 0;
-			width: 14px;
+			box-sizing: content-box; /* the row's indent is left padding on top of this width */
+			width: 20px;
+			align-self: stretch;
+			display: flex;
+			align-items: center;
+			justify-content: center;
 			color: var(--vscode-descriptionForeground);
-			font-size: 10px;
-			text-align: center;
+			font-size: 12px;
 		}
 		.sidebar-toggle:not(:empty) {
 			cursor: pointer;

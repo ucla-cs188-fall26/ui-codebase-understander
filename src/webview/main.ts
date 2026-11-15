@@ -522,8 +522,8 @@ function drawGraph(): void {
 			box.querySelector('.box-title')!.appendChild(grip);
 		}
 
-		// only the selected box can be resized, the same as moving
-		if (id === selectedId) {
+		// only the selected box can be resized, the same as moving; the root always can, since it's hard to select
+		if (id === selectedId || id === ROOT_ID) {
 			const handle = document.createElement('span');
 			handle.className = 'resize-handle';
 			handle.appendChild(makeResizeIcon());
@@ -662,13 +662,11 @@ function drawSidebar(): void {
 	open.addEventListener('click', handleOpenClick);
 	actions.appendChild(open);
 
-	// only directories have an arrangement inside them to reset
-	if (node.kind !== 'file') {
-		const reset = makeTextButton(makeResetIcon(), 'Reset layout');
-		reset.title = 'Reset everything inside this node';
-		reset.addEventListener('click', handleResetClick);
-		actions.appendChild(reset);
-	}
+	// a directory resets everything inside it; a file only has its size to reset
+	const reset = makeTextButton(makeResetIcon(), node.kind === 'file' ? 'Reset size' : 'Reset layout');
+	reset.title = node.kind === 'file' ? 'Put this box back to its default size' : 'Reset everything inside this node';
+	reset.addEventListener('click', handleResetClick);
+	actions.appendChild(reset);
 
 	sidebar.appendChild(actions);
 
@@ -1096,7 +1094,6 @@ function addConnectionList(sidebar: HTMLElement, title: string, groups: LinkGrou
 function makeLinkRow(row: LinkGroup, text: string, level: number, key: string, canOpen: boolean): HTMLElement {
 	const link = document.createElement('div');
 	link.className = 'sidebar-link';
-	link.style.paddingLeft = (level * 16) + 'px';
 	link.title = row.id; // the full path on hover
 	link.dataset.id = row.id;
 	link.addEventListener('click', handleConnectionClick);
@@ -1104,6 +1101,8 @@ function makeLinkRow(row: LinkGroup, text: string, level: number, key: string, c
 	// an empty spot for rows with nothing inside, so names line up
 	const toggle = document.createElement('span');
 	toggle.className = 'sidebar-toggle';
+	// the indent is part of the toggle, so clicking left of the arrow opens the row instead of jumping
+	toggle.style.paddingLeft = (level * 16) + 'px';
 	if (canOpen) {
 		toggle.textContent = openLinkRows.has(key) ? '▾' : '▸';
 		// a file row opens to its import lines; a folder row to what's inside it
@@ -1149,12 +1148,12 @@ function makeLinkRow(row: LinkGroup, text: string, level: number, key: string, c
 function makeImportLineRow(line: ImportLine, level: number): HTMLElement {
 	const row = document.createElement('div');
 	row.className = 'sidebar-link sidebar-line';
-	row.style.paddingLeft = (level * 16) + 'px';
 	row.title = 'Open ' + line.path + ' at line ' + line.lines.start;
 
 	// an empty spot where a toggle would be, so it lines up with the rows above
 	const toggle = document.createElement('span');
 	toggle.className = 'sidebar-toggle';
+	toggle.style.paddingLeft = (level * 16) + 'px';
 	row.appendChild(toggle);
 
 	const text = document.createElement('span');
@@ -1178,6 +1177,7 @@ function handleConnectionClick(event: MouseEvent): void {
 	const id = (event.currentTarget as HTMLElement).dataset.id!;
 	showNode(state, info!, id);
 	selectedId = id;
+	selectedEdge = undefined;
 	drawGraph();
 	centerOn(id);
 }
@@ -1835,8 +1835,10 @@ function handlePointerDown(event: PointerEvent): void {
 	}
 
 	// the corner handle resizes; checked first, since it sits on the box's grab area
-	if (target.closest('.resize-handle') !== null && selectedId !== undefined && info !== undefined) {
-		resize = { id: selectedId, startSize: boxSize(state, info, selectedId), startMouse: pressStart };
+	const handleBox = target.closest('.resize-handle')?.closest<HTMLElement>('.box');
+	if (handleBox && info !== undefined) {
+		const id = handleBox.dataset.id!;
+		resize = { id: id, startSize: boxSize(state, info, id), startMouse: pressStart };
 		return;
 	}
 

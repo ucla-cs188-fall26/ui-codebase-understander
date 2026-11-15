@@ -3,7 +3,7 @@ import { isInside, liftEdges } from '../analysis/edges';
 import { getLineage, indexChildren, indexNodes } from '../analysis/lookups';
 import { computeIndegrees, sortAllChildren } from '../analysis/metrics';
 import { defaultLayout, GAP } from './defaultLayout';
-import { Position, Rect, Size } from './geometry';
+import { overlapsWithGap, Position, Rect, Size } from './geometry';
 import { nodeSize } from './size';
 import { minSquishHeight, minSquishWidth, squishHorizontally, squishVertically } from './squish';
 
@@ -534,13 +534,70 @@ function moveSiblingsForSize(state: LayoutState, info: GraphInfo, id: string, ol
 
 	const below = dy !== 0 ? chainInPath(siblings, column, 'down') : new Set<string>();
 	const beside = dx !== 0 ? chainInPath(siblings, row, 'right') : new Set<string>();
-	for (const siblingId of siblings.keys()) {
-		const sibling = state.homes.get(siblingId)!;
-		state.homes.set(siblingId, {
-			x: beside.has(siblingId) ? sibling.x + dx : sibling.x,
-			y: below.has(siblingId) ? sibling.y + dy : sibling.y,
+
+	// where each sibling goes
+	const after = new Map<string, Rect>();
+	for (const [siblingId, rect] of siblings) {
+		after.set(siblingId, {
+			x: beside.has(siblingId) ? rect.x + dx : rect.x,
+			y: below.has(siblingId) ? rect.y + dy : rect.y,
+			width: rect.width,
+			height: rect.height,
 		});
 	}
+
+	// shrinking pulls boxes back, but one dropped in that room while the box was bigger may land on another now
+	if (dx < 0 || dy < 0) {
+		cancelPullsOntoOthers(siblings, after);
+	}
+
+	for (const [siblingId, rect] of after) {
+		state.homes.set(siblingId, { x: rect.x, y: rect.y });
+	}
+}
+
+/**
+ * Keeps boxes from being pulled onto each other. A box whose pull would land it on a box it wasn't already overlapping
+ * stays where it was instead. That can put it in another pulled box's way, so it checks again until nothing lands on
+ * anything; each pass only puts boxes back, so it always stops.
+ * @param before Every sibling's rect before the pull.
+ * @param after Where each sibling would go. Changed in place.
+ */
+function cancelPullsOntoOthers(before: Map<string, Rect>, after: Map<string, Rect>): void {
+	let cancelledOne = true;
+	while (cancelledOne) {
+		cancelledOne = false;
+		for (const [id, rect] of after) {
+			const start = before.get(id)!;
+			const moved = rect.x !== start.x || rect.y !== start.y;
+			if (moved && landsOnAnother(id, rect, before, after)) {
+				after.set(id, start);
+				cancelledOne = true;
+			}
+		}
+	}
+}
+
+/**
+ * Checks whether a box at a new spot overlaps a sibling it didn't overlap before.
+ * @param id The box.
+ * @param rect Where it would be.
+ * @param before Every sibling's rect before the pull.
+ * @param after Where every sibling would be.
+ * @returns True if it lands on one.
+ */
+function landsOnAnother(id: string, rect: Rect, before: Map<string, Rect>, after: Map<string, Rect>): boolean {
+	for (const [otherId, other] of after) {
+		if (otherId === id) {
+			continue;
+		}
+		const overlapsNow = overlapsWithGap(rect, other, 0);
+		const overlappedBefore = overlapsWithGap(before.get(id)!, before.get(otherId)!, 0);
+		if (overlapsNow && !overlappedBefore) {
+			return true;
+		}
+	}
+	return false;
 }
 
 /**

@@ -8,7 +8,7 @@ import { assignColumns, findBackEdges } from '../layout/columns';
 import { defaultLayout, GAP } from '../layout/defaultLayout';
 import { arrowHead, arrowPath, arrowPulls, arrowWidth, chooseSides, placeArrows } from '../layout/arrows';
 import { fitCamera, MAX_SCALE, zoomAt } from '../layout/camera';
-import { boundsOf, subtractRect } from '../layout/geometry';
+import { boundsOf, overlapsWithGap, subtractRect } from '../layout/geometry';
 import { arrangeChildren, arrangeShown, boxSize, changeSize, buildGraphInfo, CHILD_LIMIT, childOrigin, closeNode, copyLayoutState, createLayoutState, defaultSize, GraphInfo, LayoutState, moveTo, openNode, PADDING, hiddenSides, listPages, resetNode, resizeTo, showNode, turnPage, turnToPage } from '../layout/state';
 import { arrowTouches, arrowZIndex, boxesUnderArrow, boxZIndexes, groupInside, groupLinks, placeBoxes, placeStrips, stripId, visibleEdges } from '../layout/place';
 import { fromSaved, toSaved } from '../layout/saved';
@@ -848,6 +848,22 @@ suite('making room when a box changes size', () => {
 		for (const id of ['p/b.ts', 'p/c.ts', 'p/d.ts']) {
 			assert.deepStrictEqual(positionOf(after, id), positionOf(before, id));
 		}
+	});
+
+	test('closing never pulls one box onto another', () => {
+		const nodes = buildTree('repo', ['a/f1.ts', 'a/f2.ts', 'a/f3.ts', 'b.ts', 'c.ts']);
+		const info = buildGraphInfo({ nodes: nodes, edges: [] });
+		const state = createLayoutState();
+		openNode(state, info, ROOT_ID);
+		openNode(state, info, 'a');
+
+		// b beside the open a and c below it, close enough that pulling b left and c up would stack them
+		dropAt(state, info, 'b.ts', { x: 180, y: 40 });
+		dropAt(state, info, 'c.ts', { x: 40, y: 280 });
+		closeNode(state, info, 'a');
+
+		const rects = arrangeChildren(state, info, ROOT_ID);
+		assert.ok(!overlapsWithGap(rects.get('b.ts')!, rects.get('c.ts')!, 0));
 	});
 });
 
