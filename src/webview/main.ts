@@ -1763,6 +1763,8 @@ function handleClick(event: MouseEvent): void {
 		selectedId = undefined;
 		selectedEdge = undefined;
 	} else if (target.closest('.chevron') !== null) {
+		// opened or closed by hand, so it's the user's now, and jumps leave it alone
+		state.jumpOpened.delete(id);
 		if (state.expanded.has(id)) {
 			closeNode(state, info, id);
 			clearSelectionIfClosedAway();

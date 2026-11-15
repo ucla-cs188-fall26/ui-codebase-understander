@@ -400,8 +400,8 @@ suite('placeArrows', () => {
 		}]);
 	});
 
-	test('spreads arrows sharing a side, the higher source getting the higher spot', () => {
-		// the target is 60 tall, so its left side's thirds are at y = 100 + 20 and 100 + 40
+	test('puts an end on the side nearest its other box, the higher source getting the higher spot', () => {
+		// the target's left side runs from y = 100 to 160; each end goes to the end of it nearest its source, 10 in
 		const rects = new Map([
 			['high', { x: 0, y: 0, width: 100, height: 50 }],
 			['low', { x: 0, y: 200, width: 100, height: 50 }],
@@ -411,8 +411,66 @@ suite('placeArrows', () => {
 		// low's edge comes first, so only the sort can put high's arrow on top
 		const arrows = placeArrows([edge('low', 'target'), edge('high', 'target')], rects);
 
-		assert.deepStrictEqual(arrows[0].end, { x: 300, y: 140 });
-		assert.deepStrictEqual(arrows[1].end, { x: 300, y: 120 });
+		assert.deepStrictEqual(arrows[0].end, { x: 300, y: 150 });
+		assert.deepStrictEqual(arrows[1].end, { x: 300, y: 110 });
+	});
+
+	test('runs an arrow straight across between boxes that overlap', () => {
+		// a covers y 0 to 50 and b 30 to 130; away from their corners, they can both take an end at y = 40
+		const rects = new Map([
+			['a', { x: 0, y: 0, width: 100, height: 50 }],
+			['b', { x: 200, y: 30, width: 100, height: 100 }],
+		]);
+
+		const arrows = placeArrows([edge('a', 'b')], rects);
+
+		assert.strictEqual(arrows[0].start.y, arrows[0].end.y);
+	});
+
+	test('nudges ends that want the same spot apart, keeping their order and leaving room for each', () => {
+		// five sources stacked to the left, all overlapping the tall target, so every end would like its middle
+		const rects = new Map<string, { x: number; y: number; width: number; height: number }>([
+			['target', { x: 300, y: 0, width: 100, height: 300 }],
+		]);
+		const edges: Edge[] = [];
+		for (let i = 0; i < 5; i++) {
+			rects.set('s' + i, { x: 0, y: 140 + i, width: 100, height: 20 });
+			edges.push(edge('s' + i, 'target'));
+		}
+
+		const arrows = placeArrows(edges, rects);
+
+		// each head is 9 wide at the default width, with 4 between them
+		const spots = arrows.map(function endY(arrow) {
+			return arrow.end.y;
+		});
+		for (let i = 1; i < spots.length; i++) {
+			assert.ok(spots[i] - spots[i - 1] >= 9 + 4 - 0.001);
+		}
+	});
+
+	test('spills a crowded side\'s outermost ends onto the sides next to it', () => {
+		// a short target with six sources to its left: its left side only has room for a few
+		const rects = new Map<string, { x: number; y: number; width: number; height: number }>([
+			['target', { x: 300, y: 100, width: 100, height: 40 }],
+		]);
+		const edges: Edge[] = [];
+		for (let i = 0; i < 6; i++) {
+			rects.set('s' + i, { x: 0, y: i * 50 - 25, width: 100, height: 30 });
+			edges.push(edge('s' + i, 'target'));
+		}
+
+		const arrows = placeArrows(edges, rects);
+
+		const sides = new Set(arrows.map(function endSide(arrow) {
+			return arrow.endSide;
+		}));
+		assert.ok(sides.has('left'));
+		assert.ok(sides.has('top') || sides.has('bottom'));
+
+		// the highest source spills to the top, the lowest to the bottom
+		assert.strictEqual(arrows[0].endSide, 'top');
+		assert.strictEqual(arrows[5].endSide, 'bottom');
 	});
 });
 
@@ -1189,6 +1247,77 @@ suite('pages', () => {
 
 		assert.strictEqual(shown.rects.size, CHILD_LIMIT);
 		assert.strictEqual(shown.hiddenBottom.length, 2);
+	});
+});
+
+suite('jumping to a node', () => {
+	// two top-level directories, each holding a directory with a file, plus a second directory in a
+	function makeTwoBranches() {
+		const nodes = buildTree('repo', ['a/x/f.ts', 'a/z/h.ts', 'b/y/g.ts']);
+		const info = buildGraphInfo({ nodes: nodes, edges: [] });
+		const state = createLayoutState();
+		openNode(state, info, ROOT_ID);
+		return { info: info, state: state };
+	}
+
+	test('the next jump closes what the last one opened', () => {
+		const { info, state } = makeTwoBranches();
+
+		showNode(state, info, 'a/x/f.ts');
+		showNode(state, info, 'b/y/g.ts');
+
+		assert.ok(!state.expanded.has('a') && !state.expanded.has('a/x'));
+		assert.ok(state.expanded.has('b') && state.expanded.has('b/y'));
+	});
+
+	test('keeps open what\'s on the way to the new node', () => {
+		const { info, state } = makeTwoBranches();
+
+		showNode(state, info, 'a/x/f.ts');
+		showNode(state, info, 'a/z/h.ts');
+
+		assert.ok(state.expanded.has('a') && state.expanded.has('a/z'));
+		assert.ok(!state.expanded.has('a/x'));
+	});
+
+	test('never closes a directory the user opened', () => {
+		const { info, state } = makeTwoBranches();
+		openNode(state, info, 'a');
+
+		showNode(state, info, 'a/x/f.ts');
+		showNode(state, info, 'b/y/g.ts');
+
+		assert.ok(state.expanded.has('a'));
+		assert.ok(!state.expanded.has('a/x'));
+	});
+
+	test('keeps a jump-opened directory open while it holds one the user opened', () => {
+		const { info, state } = makeTwoBranches();
+		showNode(state, info, 'a/x/f.ts');
+
+		// the user opens a/z by hand, inside a, which the jump opened
+		openNode(state, info, 'a/z');
+		showNode(state, info, 'b/y/g.ts');
+
+		assert.ok(state.expanded.has('a') && state.expanded.has('a/z'));
+		assert.ok(!state.expanded.has('a/x'));
+	});
+
+	test('closing puts the boxes around it back where they were', () => {
+		const { info, state } = makeTwoBranches();
+		const homesBefore = new Map(state.homes);
+
+		showNode(state, info, 'a/x/f.ts');
+		showNode(state, info, 'b/y/g.ts');
+		showNode(state, info, 'a/x/f.ts');
+		showNode(state, info, 'b/y/g.ts');
+
+		// b was never pushed by a's growth for good: its home is back where it started, give or take rounding from
+		// adding and taking away the same growth
+		for (const id of ['a', 'b']) {
+			assert.ok(Math.abs(state.homes.get(id)!.x - homesBefore.get(id)!.x) < 0.001);
+			assert.ok(Math.abs(state.homes.get(id)!.y - homesBefore.get(id)!.y) < 0.001);
+		}
 	});
 });
 

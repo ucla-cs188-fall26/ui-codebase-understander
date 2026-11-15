@@ -11,6 +11,7 @@ export interface SavedLayout {
 	homes: [string, Position][];
 	pages?: [string, Page][]; // missing from layouts saved before directories had pages
 	childPages?: [string, PageCell][]; // the same
+	jumpOpened?: string[]; // missing from layouts saved before jumps closed what they opened
 	closedSizes: [string, Size][];
 	openSizes: [string, Size][];
 	camera: Camera;
@@ -32,6 +33,7 @@ export function toSaved(state: LayoutState, camera: Camera, arrowMode: ArrowMode
 		homes: Array.from(state.homes.entries()),
 		pages: Array.from(state.pages.entries()),
 		childPages: Array.from(state.childPages.entries()),
+		jumpOpened: Array.from(state.jumpOpened),
 		closedSizes: Array.from(state.closedSizes.entries()),
 		openSizes: Array.from(state.openSizes.entries()),
 		camera: camera,
@@ -77,6 +79,11 @@ export function fromSaved(saved: SavedLayout, info: GraphInfo): { state: LayoutS
 				natural: page.natural ?? page.size,
 				drawnFrom: page.drawnFrom ?? gridCorner,
 			});
+		}
+	}
+	for (const id of saved.jumpOpened ?? []) {
+		if (info.nodesById.has(id)) {
+			state.jumpOpened.add(id);
 		}
 	}
 	for (const [id, cell] of saved.childPages ?? []) {

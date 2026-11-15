@@ -73,6 +73,7 @@ Each rule should become a test.
 - The root's title doesn't show the move cursor, since the root can't be moved.
 - Resizing keeps the window's top-left where it was and recounts the pages.
 - Showing a specific node (from the sidebar, or later a flow step) turns each directory holding it to the page it's on. It's in view, but not necessarily centered.
+- Jumping to a node opens the directories around it. The next jump closes the ones it opened that aren't on the way to the new node, so jumping around doesn't crowd the graph, but never one holding a directory the user opened. Directories the user opens stay open; opening or closing one by hand makes it the user's.
 - Each directory's page is saved with the layout, so it reopens on the page it was left on.
 - Strips and growing only push right and down. A directory's left and top edges never move.
 
@@ -86,7 +87,8 @@ Each rule should become a test.
 
 - Arrows are plain curves, each with its own connection point on a box's side.
 - An arrow connects to whichever side of a box is closest to its other end.
-- When several arrows meet on one side, their connection points are spread evenly along it.
+- An arrow's end goes where it points: straight across where its two boxes overlap, or else the point on the side nearest the other box, kept clear of the corners.
+- Ends sharing a side are nudged apart just enough not to overlap (room for each line or head, plus a small gap), keeping their order so they don't cross at the box. A side too crowded for that moves its outermost ends to the sides next to it, the ones whose other boxes lie furthest that way first; a side still too crowded spreads its ends evenly.
 - An arrow goes under every box, except the boxes at its ends and the open directories holding them. Its siblings' boxes and theirs count, however they're painted.
 - Near a box it goes under, an arrow fades out first, so it doesn't look like it starts or ends there.
 - Arrows to hidden boxes attach to the strip for that side.

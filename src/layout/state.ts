@@ -44,6 +44,7 @@ export interface LayoutState {
 	homes: Map<string, Position>; // each placed box's top-left, relative to the top-left of its parent's whole layout
 	pages: Map<string, Page>; // each opened directory's current page and page size, the root's included
 	childPages: Map<string, PageCell>; // each child's page in its directory, kept until the directory is resized or reset
+	jumpOpened: Set<string>; // directories opened by jumping to a node, which the next jump closes; opening by hand keeps one
 	closedSizes: Map<string, Size>; // only boxes the user has resized while closed
 	openSizes: Map<string, Size>; // only boxes the user has resized while open; others fit their children
 }
@@ -140,6 +141,7 @@ export function createLayoutState(): LayoutState {
 		homes: new Map(),
 		pages: new Map(),
 		childPages: new Map(),
+		jumpOpened: new Set(),
 		closedSizes: new Map(),
 		openSizes: new Map(),
 	};
@@ -157,6 +159,7 @@ export function copyLayoutState(state: LayoutState): LayoutState {
 		homes: new Map(state.homes),
 		pages: new Map(state.pages),
 		childPages: new Map(state.childPages),
+		jumpOpened: new Set(state.jumpOpened),
 		closedSizes: new Map(state.closedSizes),
 		openSizes: new Map(state.openSizes),
 	};
@@ -895,6 +898,7 @@ export function resetNode(state: LayoutState, info: GraphInfo, id: string): void
 				state.expanded.delete(nodeId);
 				state.pages.delete(nodeId);
 				state.childPages.delete(nodeId);
+				state.jumpOpened.delete(nodeId);
 			}
 		}
 
@@ -1181,17 +1185,60 @@ export function openNode(state: LayoutState, info: GraphInfo, id: string): void 
  * @param id The node to show.
  */
 export function showNode(state: LayoutState, info: GraphInfo, id: string): void {
-	// the lineage runs from the node up to the root; go from the root down, each directory then the one inside it
+	// the lineage runs from the node up to the root
 	const lineage = getLineage(id, info.nodesById);
+
+	// what earlier jumps opened closes again, so jumping around doesn't crowd the graph
+	closeEarlierJumps(state, info, new Set(lineage));
+
+	// from the root down, each directory then the one inside it
 	for (let i = lineage.length - 1; i >= 1; i--) {
 		const parentId = lineage[i];
 		if (!state.expanded.has(parentId)) {
 			openNode(state, info, parentId);
+			state.jumpOpened.add(parentId);
 		}
 		const cell = state.childPages.get(lineage[i - 1]);
 		if (cell !== undefined) {
 			turnToPage(state, info, parentId, cell);
 		}
+	}
+}
+
+/**
+ * Closes the directories earlier jumps opened, deepest first, so the boxes around each move back as it closes. Ones on
+ * the way to the node being jumped to stay open, and so do ones holding a directory the user opened, so that one
+ * doesn't vanish inside a closed box.
+ * @param state The view state.
+ * @param info The graph lookups.
+ * @param keep The node being jumped to and every directory around it.
+ */
+function closeEarlierJumps(state: LayoutState, info: GraphInfo, keep: Set<string>): void {
+	const toClose: string[] = [];
+	for (const id of state.jumpOpened) {
+		if (keep.has(id)) {
+			continue;
+		}
+
+		// a directory the user opened inside it keeps it open
+		let holdsUsers = false;
+		for (const openId of state.expanded) {
+			if (openId !== id && !state.jumpOpened.has(openId) && isInside(openId, id, info.nodesById)) {
+				holdsUsers = true;
+			}
+		}
+		if (!holdsUsers) {
+			toClose.push(id);
+		}
+	}
+
+	// deepest first: a lineage runs from the node up to the root, so a longer one is deeper
+	function deepestFirst(a: string, b: string): number {
+		return getLineage(b, info.nodesById).length - getLineage(a, info.nodesById).length;
+	}
+	for (const id of toClose.sort(deepestFirst)) {
+		closeNode(state, info, id);
+		state.jumpOpened.delete(id);
 	}
 }
 

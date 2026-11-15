@@ -57,26 +57,6 @@ export function chooseSides(from: Rect, to: Rect): { fromSide: Side; toSide: Sid
 	return { fromSide: 'top', toSide: 'bottom' };
 }
 
-/**
- * Finds a point part of the way along one side of a box.
- * @param rect The box.
- * @param side Which side.
- * @param fraction How far along: 0 is the top or left end of the side, 1 the bottom or right end.
- * @returns The point on the box's edge.
- */
-export function pointOnSide(rect: Rect, side: Side, fraction: number): Position {
-	if (side === 'left') {
-		return { x: rect.x, y: rect.y + fraction * rect.height };
-	}
-	if (side === 'right') {
-		return { x: rect.x + rect.width, y: rect.y + fraction * rect.height };
-	}
-	if (side === 'top') {
-		return { x: rect.x + fraction * rect.width, y: rect.y };
-	}
-	return { x: rect.x + fraction * rect.width, y: rect.y + rect.height };
-}
-
 // where one arrow leaves its box and where it enters the other
 export interface Arrow {
 	from: string;
@@ -87,11 +67,19 @@ export interface Arrow {
 	endSide: Side;
 }
 
+// how far in from a box's corner an arrow can attach, past its rounded corner
+const END_INSET = 10;
+
+// the room left between two arrows' ends on one side, beyond what their lines or heads take
+const END_GAP = 4;
+
 // one end of an arrow, waiting for its spot along a side
 interface WaitingEnd {
 	arrowIndex: number;
 	isStart: boolean;
-	otherCenter: Position; // where the arrow's other box is, so ends can be sorted to avoid crossings
+	other: Rect; // the arrow's other box, which decides where this end would like to be
+	preferred: number; // where along the side this end would like to be
+	size: number; // how much room it takes along the side: its line's width, or its head's for the end it points into
 }
 
 // every end waiting on one side of one box
@@ -115,42 +103,200 @@ function coordinateAlong(point: Position, side: Side): number {
 }
 
 /**
- * Orders the ends on one side the same way their other boxes are ordered, so arrows don't cross at the box.
+ * Finds the stretch of a side arrows can attach to: its whole length, less END_INSET at each corner.
+ * @param rect The box.
+ * @param side The side.
+ * @returns Where the stretch starts and ends, along the side. A side too short for the insets is just its middle.
+ */
+function usableStretch(rect: Rect, side: Side): { start: number; end: number } {
+	let start = rect.y;
+	let length = rect.height;
+	if (side === 'top' || side === 'bottom') {
+		start = rect.x;
+		length = rect.width;
+	}
+	if (length < 2 * END_INSET) {
+		return { start: start + length / 2, end: start + length / 2 };
+	}
+	return { start: start + END_INSET, end: start + length - END_INSET };
+}
+
+/**
+ * Finds where along a side an arrow's end would like to be: where the two boxes overlap along it, so the arrow runs
+ * straight across, or else the point nearest the other box.
+ * @param rect The end's box.
+ * @param side The side it's on.
+ * @param other The arrow's other box.
+ * @returns A spot along the side, within its usable stretch.
+ */
+function preferredSpot(rect: Rect, side: Side, other: Rect): number {
+	const stretch = usableStretch(rect, side);
+
+	// the other box's usable stretch in the same direction; its side facing this one runs the same way
+	const otherStretch = usableStretch(other, side);
+
+	// overlapping: the middle of where both stretches overlap, which the other end works out the same way, so the
+	// arrow is straight
+	const low = Math.max(stretch.start, otherStretch.start);
+	const high = Math.min(stretch.end, otherStretch.end);
+	if (low <= high) {
+		return (low + high) / 2;
+	}
+
+	// apart: the end of the stretch nearest the other box
+	if (otherStretch.end < stretch.start) {
+		return stretch.start;
+	}
+	return stretch.end;
+}
+
+/**
+ * Finds the room two neighboring ends need between their spots: half of each one's size, plus a gap.
+ * @param a One end.
+ * @param b The next end along.
+ * @returns The distance between their spots.
+ */
+function spacingBetween(a: WaitingEnd, b: WaitingEnd): number {
+	return a.size / 2 + b.size / 2 + END_GAP;
+}
+
+/**
+ * Finds how much room a side's ends need, end to end.
+ * @param ends The ends, in order along the side.
+ * @returns The total distance from the first spot to the last.
+ */
+function roomNeeded(ends: WaitingEnd[]): number {
+	let room = 0;
+	for (let i = 1; i < ends.length; i++) {
+		room += spacingBetween(ends[i - 1], ends[i]);
+	}
+	return room;
+}
+
+/**
+ * Orders the ends on one side by where they'd like to be, so arrows don't cross at the box; ties go by where their
+ * other boxes are, then by edge order.
  * @param ends The ends waiting on one side.
  * @param side Which side they are on.
- * @returns A sorted copy. Ties keep their edge order.
+ * @returns A sorted copy.
  */
 function sortAlongSide(ends: WaitingEnd[], side: Side): WaitingEnd[] {
 	function compareAlong(a: WaitingEnd, b: WaitingEnd): number {
-		return coordinateAlong(a.otherCenter, side) - coordinateAlong(b.otherCenter, side);
+		if (a.preferred !== b.preferred) {
+			return a.preferred - b.preferred;
+		}
+		return coordinateAlong(centerOf(a.other), side) - coordinateAlong(centerOf(b.other), side);
 	}
 	return ends.toSorted(compareAlong);
 }
 
 /**
- * Works out where every arrow starts and ends, spreading arrows that share a side evenly along it.
- * @param edges The edges to draw.
+ * Finds the sides next to a side, at its start and its end: above and below a left or right side, left and right of a
+ * top or bottom one.
+ * @param side The side.
+ * @returns The side next to its start, and the side next to its end.
+ */
+function neighborsOf(side: Side): { atStart: Side; atEnd: Side } {
+	if (side === 'left' || side === 'right') {
+		return { atStart: 'top', atEnd: 'bottom' };
+	}
+	return { atStart: 'left', atEnd: 'right' };
+}
+
+/**
+ * Gives each end on a side its spot: where it'd like to be, nudged apart just enough that no two are closer than they
+ * need, keeping their order. When they can't all fit, they spread evenly, which gives each as much room as there is.
+ * @param ends The ends, sorted along the side.
+ * @param rect The box.
+ * @param side The side.
+ * @returns Each end's spot along the side, in the same order.
+ */
+function spotsAlongSide(ends: WaitingEnd[], rect: Rect, side: Side): number[] {
+	const stretch = usableStretch(rect, side);
+
+	// too crowded even after spilling: evenly spaced over the whole side, never at a corner
+	if (roomNeeded(ends) > stretch.end - stretch.start) {
+		const spots: number[] = [];
+		const start = coordinateAlong(rect, side);
+		const length = side === 'left' || side === 'right' ? rect.height : rect.width;
+		for (let i = 0; i < ends.length; i++) {
+			spots.push(start + (i + 1) / (ends.length + 1) * length);
+		}
+		return spots;
+	}
+
+	// forward: each at least its spacing past the one before; then back, so the last fits, pulling earlier ones along
+	const spots: number[] = [];
+	for (let i = 0; i < ends.length; i++) {
+		let spot = Math.max(ends[i].preferred, stretch.start);
+		if (i > 0) {
+			spot = Math.max(spot, spots[i - 1] + spacingBetween(ends[i - 1], ends[i]));
+		}
+		spots.push(spot);
+	}
+	for (let i = ends.length - 1; i >= 0; i--) {
+		let limit = stretch.end;
+		if (i < ends.length - 1) {
+			limit = spots[i + 1] - spacingBetween(ends[i], ends[i + 1]);
+		}
+		spots[i] = Math.min(spots[i], limit);
+	}
+	return spots;
+}
+
+/**
+ * Finds a point on one side of a box, at a spot along it.
+ * @param rect The box.
+ * @param side Which side.
+ * @param spot Where along the side: a y for a left or right side, an x for a top or bottom one.
+ * @returns The point on the box's edge.
+ */
+function pointAt(rect: Rect, side: Side, spot: number): Position {
+	if (side === 'left') {
+		return { x: rect.x, y: spot };
+	}
+	if (side === 'right') {
+		return { x: rect.x + rect.width, y: spot };
+	}
+	if (side === 'top') {
+		return { x: spot, y: rect.y };
+	}
+	return { x: spot, y: rect.y + rect.height };
+}
+
+/**
+ * Works out where every arrow starts and ends. Each end goes where it points: straight across where its two boxes
+ * overlap, or else the point nearest the other box. Ends sharing a side are nudged apart just enough not to overlap,
+ * keeping their order. A side too crowded for that spills its outermost ends onto the sides next to it, the ones
+ * whose other boxes lie furthest that way first; a side still too crowded spreads its ends evenly.
+ * @param edges The edges to draw; one with a count draws thicker, so its ends need more room.
  * @param rects Every box at either end of an edge, by id.
  * @returns One arrow per edge, in the same order.
  */
-export function placeArrows(edges: Edge[], rects: Map<string, Rect>): Arrow[] {
+export function placeArrows(edges: (Edge & { count?: number })[], rects: Map<string, Rect>): Arrow[] {
 	const arrows: Arrow[] = [];
 
 	// keyed by box id and side, like "src/app left"
 	const groups = new Map<string, SideGroup>();
-
-	function addEnd(boxId: string, side: Side, end: WaitingEnd): void {
+	function groupFor(boxId: string, side: Side): SideGroup {
 		const key = boxId + ' ' + side;
-		const group = groups.get(key) ?? { rect: rects.get(boxId)!, side: side, ends: [] };
-		group.ends.push(end);
-		groups.set(key, group);
+		let group = groups.get(key);
+		if (group === undefined) {
+			group = { rect: rects.get(boxId)!, side: side, ends: [] };
+			groups.set(key, group);
+		}
+		return group;
 	}
+
+	// which box each end belongs to, so a spilled end can find its new side's group
+	const boxOfEnd = new Map<WaitingEnd, string>();
 
 	for (let i = 0; i < edges.length; i++) {
 		const edge = edges[i];
 		const fromRect = rects.get(edge.from)!;
 		const toRect = rects.get(edge.to)!;
 		const sides = chooseSides(fromRect, toRect);
+		const width = arrowWidth(edge.count ?? 1);
 
 		// the points are placeholders until every arrow on each side is known
 		arrows.push({
@@ -162,16 +308,74 @@ export function placeArrows(edges: Edge[], rects: Map<string, Rect>): Arrow[] {
 			endSide: sides.toSide,
 		});
 
-		addEnd(edge.from, sides.fromSide, { arrowIndex: i, isStart: true, otherCenter: centerOf(toRect) });
-		addEnd(edge.to, sides.toSide, { arrowIndex: i, isStart: false, otherCenter: centerOf(fromRect) });
+		const start: WaitingEnd = {
+			arrowIndex: i,
+			isStart: true,
+			other: toRect,
+			preferred: preferredSpot(fromRect, sides.fromSide, toRect),
+			size: width,
+		};
+		const end: WaitingEnd = {
+			arrowIndex: i,
+			isStart: false,
+			other: fromRect,
+			preferred: preferredSpot(toRect, sides.toSide, fromRect),
+			size: headLength(width),
+		};
+		groupFor(edge.from, sides.fromSide).ends.push(start);
+		groupFor(edge.to, sides.toSide).ends.push(end);
+		boxOfEnd.set(start, edge.from);
+		boxOfEnd.set(end, edge.to);
+	}
+
+	// crowded sides spill onto the sides next to them. Every side decides from the ends it started with, and the moves
+	// happen after, so an end moves at most once
+	const moves: { end: WaitingEnd; boxId: string; side: Side }[] = [];
+	for (const group of groups.values()) {
+		let ends = sortAlongSide(group.ends, group.side);
+		const stretch = usableStretch(group.rect, group.side);
+		const neighbors = neighborsOf(group.side);
+		const middle = (stretch.start + stretch.end) / 2;
+
+		while (ends.length > 1 && roomNeeded(ends) > stretch.end - stretch.start) {
+			// the outermost end whose other box lies furthest past the middle goes to the side on its way
+			const first = ends[0];
+			const last = ends[ends.length - 1];
+			const firstReach = middle - coordinateAlong(centerOf(first.other), group.side);
+			const lastReach = coordinateAlong(centerOf(last.other), group.side) - middle;
+			let moving = last;
+			let newSide = neighbors.atEnd;
+			if (firstReach > lastReach) {
+				moving = first;
+				newSide = neighbors.atStart;
+			}
+			ends = ends.filter(function isStaying(end: WaitingEnd): boolean {
+				return end !== moving;
+			});
+
+			moves.push({ end: moving, boxId: boxOfEnd.get(moving)!, side: newSide });
+		}
+		group.ends = ends;
+	}
+
+	// on its new side, a moved end would like to be as near its other box as that side allows
+	for (const move of moves) {
+		const group = groupFor(move.boxId, move.side);
+		move.end.preferred = preferredSpot(group.rect, move.side, move.end.other);
+		group.ends.push(move.end);
+		const arrow = arrows[move.end.arrowIndex];
+		if (move.end.isStart) {
+			arrow.startSide = move.side;
+		} else {
+			arrow.endSide = move.side;
+		}
 	}
 
 	for (const group of groups.values()) {
 		const ends = sortAlongSide(group.ends, group.side);
-
-		// n ends sit at 1/(n+1), 2/(n+1), ... along the side: evenly spaced, never at a corner
+		const spots = spotsAlongSide(ends, group.rect, group.side);
 		for (let i = 0; i < ends.length; i++) {
-			const point = pointOnSide(group.rect, group.side, (i + 1) / (ends.length + 1));
+			const point = pointAt(group.rect, group.side, spots[i]);
 			const arrow = arrows[ends[i].arrowIndex];
 			if (ends[i].isStart) {
 				arrow.start = point;
@@ -206,6 +410,16 @@ function directionOf(side: Side): Position {
 }
 
 /**
+ * Finds how long an arrow's head is, and as wide at its base: bigger for thicker arrows, so the line never shows past
+ * the head's sides.
+ * @param width The arrow's line width, from arrowWidth.
+ * @returns The head's length, in pixels: 9 for a normal 1.5px arrow, the size heads have always been.
+ */
+export function headLength(width: number): number {
+	return 6 + 2 * width;
+}
+
+/**
  * Works out an arrow's head: a triangle with its tip on the arrow's end, pointing into the box. The curve always
  * arrives head-on, so the head lines up with the side it ends at. Thicker arrows get bigger heads, so the line never
  * shows past the head's sides.
@@ -214,8 +428,7 @@ function directionOf(side: Side): Position {
  * @returns How long the head is along the arrow, and the triangle as SVG path data.
  */
 export function arrowHead(arrow: Arrow, width: number): { length: number; path: string } {
-	// 9 for a normal 1.5px arrow, the size heads have always been
-	const length = 6 + 2 * width;
+	const length = headLength(width);
 
 	// back from the tip, out of the box, to the middle of the head's base; then half the base to each side
 	const out = directionOf(arrow.endSide);
