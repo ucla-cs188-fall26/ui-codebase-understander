@@ -819,10 +819,10 @@ function buildHtml(scriptUri: vscode.Uri): string {
 			position: absolute;
 			top: calc(100% + 10px);
 			left: 0;
-			min-width: 260px;
+			width: max-content;
 			flex-direction: column;
 			gap: 10px;
-			padding: 10px 12px;
+			padding: 12px 16px;
 			border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
 			border-radius: 8px;
 			background: var(--vscode-editorWidget-background);
@@ -837,14 +837,14 @@ function buildHtml(scriptUri: vscode.Uri): string {
 		/* a label, then its control */
 		.popup-row {
 			display: grid;
-			grid-template-columns: 3.5em 1fr;
+			grid-template-columns: 3em auto;
 			align-items: center;
-			column-gap: 8px;
+			column-gap: 12px;
 		}
 		.popup-control {
 			display: flex;
 			align-items: center;
-			gap: 2px;
+			gap: 8px;
 		}
 		/* the arrow strength that's on */
 		.text-button[aria-pressed="true"] {
@@ -896,11 +896,15 @@ function buildHtml(scriptUri: vscode.Uri): string {
 			color-scheme: dark;
 		}
 		/* the deepest level, dimmed beside the depth */
-		#arrow-depth-max {
+		/* the deepest level beside the depth field: "/ 6", dimmed */
+		.arrow-depth-max {
 			align-self: center;
-			padding: 0 2px;
 			color: var(--vscode-descriptionForeground);
 			font-size: 11px;
+		}
+		/* the depth row: a small, even gap on each side of the slash */
+		.depth-control {
+			gap: 4px;
 		}
 		#model-select:disabled {
 			opacity: 0.75;

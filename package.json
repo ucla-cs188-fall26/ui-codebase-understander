@@ -16,7 +16,8 @@
       {
         "command": "codeflow-visualizer.openGraph",
         "title": "Open Graph",
-        "category": "Codeflow"
+        "category": "Codeflow",
+        "icon": "$(type-hierarchy)"
       },
       {
         "command": "codeflow-visualizer.resetLayout",
@@ -53,8 +54,8 @@
     "menus": {
       "editor/title": [
         {
-          "command": "codeflow-visualizer.resetLayout",
-          "when": "activeWebviewPanelId == 'codeflowGraph'",
+          "command": "codeflow-visualizer.openGraph",
+          "when": "activeWebviewPanelId != 'codeflowGraph'",
           "group": "navigation"
         }
       ],

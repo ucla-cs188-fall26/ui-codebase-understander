@@ -1,7 +1,7 @@
 import * as assert from 'assert';
 import { buildEdges, buildTree } from '../graph/build';
 import { scanImports } from '../graph/imports';
-import { groupByParent, indexChildren, indexNodes } from '../analysis/lookups';
+import { indexChildren, indexNodes } from '../analysis/lookups';
 import { computeIndegrees, sortChildren } from '../analysis/metrics';
 import { connections, findChildContaining, liftEdges } from '../analysis/edges';
 import { assignColumns, findBackEdges } from '../layout/columns';
@@ -9,14 +9,13 @@ import { defaultLayout, GAP } from '../layout/defaultLayout';
 import { arrowHead, arrowPath, arrowPulls, arrowWidth, chooseSides, placeArrows } from '../layout/arrows';
 import { fitCamera, MAX_SCALE, zoomAt } from '../layout/camera';
 import { boundsOf, subtractRect } from '../layout/geometry';
-import { arrangeChildren, arrangeShown, boxSize, changeSize, buildGraphInfo, childOrigin, closeNode, copyLayoutState, createLayoutState, defaultSize, GraphInfo, LayoutState, moveTo, openNode, PADDING, hiddenSides, listPages, resetNode, resizeTo, showNode, turnPage, turnToPage } from '../layout/state';
+import { arrangeChildren, arrangeShown, boxSize, changeSize, buildGraphInfo, CHILD_LIMIT, childOrigin, closeNode, copyLayoutState, createLayoutState, defaultSize, GraphInfo, LayoutState, moveTo, openNode, PADDING, hiddenSides, listPages, resetNode, resizeTo, showNode, turnPage, turnToPage } from '../layout/state';
 import { arrowTouches, arrowZIndex, boxesUnderArrow, boxZIndexes, groupInside, groupLinks, placeBoxes, placeStrips, stripId, visibleEdges } from '../layout/place';
 import { fromSaved, toSaved } from '../layout/saved';
 import { dragTo, dropAt, settleDrop } from '../layout/drop';
 import { minSquishHeight, minSquishWidth, squishHorizontally, squishVertically } from '../layout/squish';
 import { nodeSize } from '../layout/size';
 import { Edge, ROOT_ID } from '../graph/types';
-import { CHILD_LIMIT, getVisibleNodes } from '../layout/visibility';
 import { resolveImport } from '../graph/resolve';
 
 suite('buildTree', () => {
@@ -82,44 +81,6 @@ suite('nodeSize', () => {
 
 	test('never grows past the maximum', () => {
 		assert.deepStrictEqual(nodeSize(100000, 100000), { width: 260, height: 84 });
-	});
-});
-
-suite('getVisibleNodes', () => {
-	const nodes = buildTree('repo', ['README.md', 'src/app.ts', 'src/lib/b.ts', 'test/b.test.ts']);
-	const childrenById = indexChildren(nodes);
-
-	test('shows only the top level when nothing is expanded', () => {
-		const visible = getVisibleNodes(childrenById, new Set(), new Map());
-
-		assert.deepStrictEqual(visible.nodeIds, ['.', 'README.md', 'src', 'test']);
-	});
-
-	test('goes into expanded directories and stops at collapsed ones', () => {
-		const visible = getVisibleNodes(childrenById, new Set(['src']), new Map());
-
-		assert.deepStrictEqual(visible.nodeIds, ['.', 'README.md', 'src', 'src/app.ts', 'src/lib', 'test']);
-	});
-
-	suite('with more children than the limit', () => {
-		const paths = Array.from({ length: 15 }, (_, index) => `src/file${index + 10}.ts`);
-		const bigDirectoryChildren = indexChildren(buildTree('repo', paths));
-
-		test('collapses the extra children into a box', () => {
-			const visible = getVisibleNodes(bigDirectoryChildren, new Set(['src']), new Map());
-
-			assert.strictEqual(visible.nodeIds.length, 2 + CHILD_LIMIT); // the root, src, and the shown files
-			assert.deepStrictEqual(visible.moreBoxes, [
-				{ id: 'src#more', parent: 'src', hiddenIds: paths.slice(CHILD_LIMIT) },
-			]);
-		});
-
-		test('shows more children once revealed', () => {
-			const visible = getVisibleNodes(bigDirectoryChildren, new Set(['src']), new Map([['src', 15]]));
-
-			assert.strictEqual(visible.nodeIds.length, 2 + 15);
-			assert.deepStrictEqual(visible.moreBoxes, []);
-		});
 	});
 });
 
@@ -208,20 +169,6 @@ suite('liftEdges', () => {
 
 		assert.deepStrictEqual(lifted, [
 			{ from: 'src/a.ts', to: 'src/lib', kind: 'import' },
-		]);
-	});
-});
-
-suite('groupByParent', () => {
-	test('groups nodes under their parents, both sorted', () => {
-		const nodes = buildTree('repo', ['src/b.ts', 'src/a.ts', 'lib/c.ts', 'README.md']);
-
-		const grouped = groupByParent(['src/b.ts', 'README.md', 'src/a.ts', 'lib/c.ts'], indexNodes(nodes));
-
-		assert.deepStrictEqual(Array.from(grouped.entries()), [
-			['.', ['README.md']],
-			['lib', ['lib/c.ts']],
-			['src', ['src/a.ts', 'src/b.ts']],
 		]);
 	});
 });
@@ -2022,6 +1969,15 @@ suite('paint order', () => {
 
 		assert.ok(!under.includes('app'));
 		assert.ok(under.includes('app/db.ts'));
+	});
+
+	test('leaves out boxes that don\'t overlap the arrow\'s area', () => {
+		const { info, rects } = makeTwoOpen();
+		const api = rects.get('app/api')!;
+
+		const under = boxesUnderArrow(edge('top.ts', 'app/db.ts'), info, rects, api);
+
+		assert.deepStrictEqual(under, ['app/api']);
 	});
 
 	// an arrow as visibleEdges makes it, drawn between two ends and carrying the given edges

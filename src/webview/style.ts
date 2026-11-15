@@ -2,7 +2,7 @@ import { StyleColors } from '../messages';
 
 // every part of the graph's look a user might want to change, in one place. Colors fall back to the theme, so the
 // graph fits any theme; the codeflow.* settings can replace them
-export const STYLE = {
+const STYLE = {
 	// the accent on folders: a bar down the left edge, and a tint in the title
 	folderColor: 'var(--vscode-charts-blue, #3794ff)',
 	// a bar down files' left edge, like folders have; none unless the user picks one

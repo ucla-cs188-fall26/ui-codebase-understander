@@ -2,7 +2,7 @@ import { Edge, Node, NodeKind, ROOT_ID } from '../graph/types';
 import { ExtensionToWebview, FlowGraphMessage, FlowScenario, ModelOption, WebviewToExtension } from '../messages';
 import { connections, isInside } from '../analysis/edges';
 import { getLineage } from '../analysis/lookups';
-import { Arrow, arrowHead, arrowPath, arrowPulls, arrowWidth, placeArrows } from '../layout/arrows';
+import { Arrow, arrowBounds, arrowHead, arrowPath, arrowWidth, placeArrows } from '../layout/arrows';
 import { Camera, fitCamera, zoomAt } from '../layout/camera';
 import { boundsOf, Position, Rect, Size, subtractRect } from '../layout/geometry';
 import { arrangeShown, boxSize, buildGraphInfo, closeNode, copyLayoutState, createLayoutState, fitPagesToSizes, listPages, GraphInfo, layOutChildren, LayoutState, openNode, resetNode, resizeTo, StripSide, turnPage, PageListing, showNode, turnToPage } from '../layout/state';
@@ -10,7 +10,7 @@ import { ArrowMode, fromSaved, toSaved } from '../layout/saved';
 import { dragTo, dropAt } from '../layout/drop';
 import { applyStyle } from './style';
 import { makeArrowsIcon, makeCloseIcon, makeFitIcon, makeGripIcon, makeOpenIcon, makeResetIcon, makeResizeIcon, makeSettingsIcon, SVG_NS } from './icons';
-import { arrowEndsOf, arrowTouches, arrowZIndex, boxesUnderArrow, boxZIndexes, groupInside, groupLinks, LinkGroup, nodeOfEnd, placeBoxes, placeStrips, Strip, VisibleEdge, visibleEdges } from '../layout/place';
+import { arrowTouches, arrowZIndex, boxesUnderArrow, boxZIndexes, groupInside, groupLinks, LinkGroup, nodeOfEnd, placeBoxes, placeStrips, Strip, VisibleEdge, visibleEdges } from '../layout/place';
 
 // VS Code provides this once per webview; calling it a second time throws
 declare function acquireVsCodeApi(): { postMessage(message: WebviewToExtension): void };
@@ -203,16 +203,11 @@ function makeArrow(arrow: Arrow, edge: VisibleEdge, zIndex: number, under: Rect[
 	svg.style.zIndex = String(zIndex);
 	// The SVG needs a viewport around the whole curve; otherwise only the portion in its default 300x150 box
 	// receives pointer events, even though overflow lets the rest of the curve remain visible.
-	// A curve never leaves the shape its ends and pull points make, so their bounds hold it; the margin is room for the
-	// click target (12 wide) and the widest head (16).
-	const pulls = arrowPulls(arrow);
-	const xs = [arrow.start.x, arrow.end.x, pulls.first.x, pulls.second.x];
-	const ys = [arrow.start.y, arrow.end.y, pulls.first.y, pulls.second.y];
-	const margin = 10;
-	const left = Math.min(...xs) - margin;
-	const top = Math.min(...ys) - margin;
-	const width = Math.max(...xs) - Math.min(...xs) + margin * 2;
-	const height = Math.max(...ys) - Math.min(...ys) + margin * 2;
+	const bounds = arrowBounds(arrow);
+	const left = bounds.x;
+	const top = bounds.y;
+	const width = bounds.width;
+	const height = bounds.height;
 	svg.setAttribute('viewBox', left + ' ' + top + ' ' + width + ' ' + height);
 	svg.setAttribute('width', String(width));
 	svg.setAttribute('height', String(height));
@@ -432,6 +427,7 @@ function drawGraph(): void {
 	}
 
 	const edges = visibleEdges(state, info, rects, strips, arrowDepth);
+	lastEdges = edges;
 	const arrows = placeArrows(edges, arrowRects);
 
 	nextArrowId = 0;
@@ -460,8 +456,12 @@ function drawGraph(): void {
 		// top of them
 		const onDragged = dragged !== undefined
 			&& (isInside(nodeOfEnd(edges[i].from), drag!.id, info.nodesById) || isInside(nodeOfEnd(edges[i].to), drag!.id, info.nodesById));
+		// only boxes near enough for their cut-out or fade bands to reach the arrow
+		const area = arrowBounds(arrows[i]);
+		const reach = FADE_BANDS * FADE_STEP;
+		const near = { x: area.x - reach, y: area.y - reach, width: area.width + reach * 2, height: area.height + reach * 2 };
 		const under: Rect[] = [];
-		for (const id of boxesUnderArrow(edges[i], info, rects)) {
+		for (const id of boxesUnderArrow(edges[i], info, rects, near)) {
 			const rect = rects.get(id)!;
 			if (onDragged) {
 				for (const piece of subtractRect(rect, dragged!)) {
@@ -614,6 +614,8 @@ let flowView: FlowGraphMessage | undefined;
 
 // every box drawn last time, so Fit to view can measure what's on screen
 let lastRects = new Map<string, Rect>();
+// every arrow drawn last time, so the sidebar can list what the selected one stands for
+let lastEdges: VisibleEdge[] = [];
 
 /**
  * Shows the selected node's details in the sidebar, or hides the sidebar when nothing is selected.
@@ -638,20 +640,7 @@ function drawSidebar(): void {
 		openLinkRowsFor = selectedId;
 	}
 
-	const header = document.createElement('div');
-	header.className = 'sidebar-header';
-	const name = document.createElement('span');
-	name.textContent = node.name;
-	header.appendChild(name);
-
-	const close = document.createElement('button');
-	close.className = 'icon-button sidebar-close';
-	close.title = 'Close';
-	close.appendChild(makeCloseIcon());
-	close.addEventListener('click', handleSidebarClose);
-	header.appendChild(close);
-
-	sidebar.appendChild(header);
+	addSidebarHeader(sidebar, document.createTextNode(node.name));
 
 	// what you can do with this node, before the details you read
 	const actions = document.createElement('div');
@@ -709,13 +698,13 @@ function drawEdgeSidebar(sidebar: HTMLElement, selected: Edge): void {
 		openLinkRowsFor = arrowKey;
 	}
 
-	const rects = placeBoxes(state, info!, { x: START_X, y: START_Y });
-	const strips = placeStrips(state, info!, rects);
-	// grouped the same way the arrows are drawn, so a merged arrow lists every import it stands for
-	const represented = info!.edges.filter((edge) => {
-		const ends = arrowEndsOf(edge, state, info!, rects, strips, arrowDepth);
-		return ends !== undefined && ends.from === selected.from && ends.to === selected.to;
-	});
+	// the arrow as last drawn carries every import it stands for, grouped the same way
+	let represented: Edge[] = [];
+	for (const arrow of lastEdges) {
+		if (arrow.from === selected.from && arrow.to === selected.to) {
+			represented = arrow.edges;
+		}
+	}
 
 	// how many imports come from each file on one end, and go to each file on the other
 	const fromCounts = new Map<string, number>();
@@ -726,20 +715,11 @@ function drawEdgeSidebar(sidebar: HTMLElement, selected: Edge): void {
 	}
 
 	// the header: the two ends
-	const header = document.createElement('div');
-	header.className = 'sidebar-header';
-	const title = document.createElement('span');
+	const title = document.createDocumentFragment();
 	title.appendChild(makeEndLabel(selected.from, endName(selected.from)));
 	title.appendChild(document.createTextNode(' → '));
 	title.appendChild(makeEndLabel(selected.to, endName(selected.to)));
-	header.appendChild(title);
-	const close = document.createElement('button');
-	close.className = 'icon-button sidebar-close';
-	close.title = 'Close';
-	close.appendChild(makeCloseIcon());
-	close.addEventListener('click', handleSidebarClose);
-	header.appendChild(close);
-	sidebar.appendChild(header);
+	addSidebarHeader(sidebar, title);
 
 	// the same label and value rows as a box's sidebar; the ends' values are filled in after, since a hidden end is
 	// styled
@@ -754,6 +734,28 @@ function drawEdgeSidebar(sidebar: HTMLElement, selected: Edge): void {
 	addConnectionList(sidebar, 'From ' + hiddenPrefix(selected.from) + endName(selected.from), groupInside(fromBox, fromCounts, info!), fromBox);
 	addConnectionList(sidebar, 'To ' + hiddenPrefix(selected.to) + endName(selected.to), groupInside(toBox, toCounts, info!), toBox);
 	sidebar.classList.add('visible');
+}
+
+/**
+ * Adds the sidebar's header: a title, then a button that closes the sidebar.
+ * @param sidebar The sidebar element.
+ * @param title What goes in the title: the box's name, or the arrow's two ends.
+ */
+function addSidebarHeader(sidebar: HTMLElement, title: HTMLElement | DocumentFragment | Text): void {
+	const header = document.createElement('div');
+	header.className = 'sidebar-header';
+	const titleElement = document.createElement('span');
+	titleElement.appendChild(title);
+	header.appendChild(titleElement);
+
+	const close = document.createElement('button');
+	close.className = 'icon-button sidebar-close';
+	close.title = 'Close';
+	close.appendChild(makeCloseIcon());
+	close.addEventListener('click', handleSidebarClose);
+	header.appendChild(close);
+
+	sidebar.appendChild(header);
 }
 
 /**
@@ -1192,7 +1194,7 @@ function showArrowDepth(): void {
 	const input = document.getElementById('arrow-depth') as HTMLInputElement;
 	input.max = String(deepest);
 	input.value = String(arrowDepth);
-	document.getElementById('arrow-depth-max')!.textContent = '/ ' + deepest;
+	document.getElementById('arrow-depth-max')!.textContent = String(deepest);
 }
 
 /**
@@ -1372,8 +1374,15 @@ function drawToolbar(): void {
 	depth.control.appendChild(depthInput);
 
 	// the deepest level, dimmed beside the field
+	// the slash and the number are separate, so the row's gap spaces both sides of the slash evenly
+	depth.control.classList.add('depth-control');
+	const depthSlash = document.createElement('span');
+	depthSlash.className = 'arrow-depth-max';
+	depthSlash.textContent = '/';
+	depth.control.appendChild(depthSlash);
 	const depthMax = document.createElement('span');
 	depthMax.id = 'arrow-depth-max';
+	depthMax.className = 'arrow-depth-max';
 	depth.control.appendChild(depthMax);
 	showArrowDepth();
 

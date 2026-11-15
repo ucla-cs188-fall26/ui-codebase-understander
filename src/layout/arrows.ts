@@ -415,7 +415,7 @@ function directionOf(side: Side): Position {
  * @param width The arrow's line width, from arrowWidth.
  * @returns The head's length, in pixels: 9 for a normal 1.5px arrow, the size heads have always been.
  */
-export function headLength(width: number): number {
+function headLength(width: number): number {
 	return 6 + 2 * width;
 }
 
@@ -463,6 +463,27 @@ export function arrowPulls(arrow: Arrow): { first: Position; second: Position } 
 	return {
 		first: { x: arrow.start.x + startDirection.x * startPull, y: arrow.start.y + startDirection.y * startPull },
 		second: { x: arrow.end.x + endDirection.x * endPull, y: arrow.end.y + endDirection.y * endPull },
+	};
+}
+
+/**
+ * Finds the area an arrow can draw in: a curve never leaves the shape its ends and pull points make, so their bounds
+ * hold it, plus a margin for the click target (12 wide) and the widest head (16).
+ * @param arrow The arrow, from placeArrows.
+ * @returns The area, in page coordinates.
+ */
+export function arrowBounds(arrow: Arrow): Rect {
+	const pulls = arrowPulls(arrow);
+	const xs = [arrow.start.x, arrow.end.x, pulls.first.x, pulls.second.x];
+	const ys = [arrow.start.y, arrow.end.y, pulls.first.y, pulls.second.y];
+	const margin = 10;
+	const left = Math.min(...xs) - margin;
+	const top = Math.min(...ys) - margin;
+	return {
+		x: left,
+		y: top,
+		width: Math.max(...xs) + margin - left,
+		height: Math.max(...ys) + margin - top,
 	};
 }
 

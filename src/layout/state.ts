@@ -5,8 +5,10 @@ import { computeIndegrees, sortAllChildren } from '../analysis/metrics';
 import { defaultLayout, GAP } from './defaultLayout';
 import { Position, Rect, Size } from './geometry';
 import { nodeSize } from './size';
-import { CHILD_LIMIT } from './visibility';
 import { minSquishHeight, minSquishWidth, squishHorizontally, squishVertically } from './squish';
+
+// how many children a parent shows, and how many more each click reveals
+export const CHILD_LIMIT = 5;
 
 // lookups about the graph, built once per graph and shared by everything that lays it out
 export interface GraphInfo {
@@ -189,7 +191,7 @@ function cellOf(position: Position, anchor: Position, size: Size): PageCell {
  * @param parentId The directory.
  * @returns The page's drawn top-left, in the layout's coordinates; (0, 0) for a directory without pages.
  */
-export function pageOrigin(state: LayoutState, parentId: string): Position {
+function pageOrigin(state: LayoutState, parentId: string): Position {
 	const page = state.pages.get(parentId);
 	if (page === undefined) {
 		return { x: 0, y: 0 };
@@ -248,7 +250,7 @@ function isOnPage(state: LayoutState, parentId: string, id: string): boolean {
  * @param parentId The node whose children we want.
  * @returns The shown children, most important first.
  */
-export function shownChildren(state: LayoutState, info: GraphInfo, parentId: string): string[] {
+function shownChildren(state: LayoutState, info: GraphInfo, parentId: string): string[] {
 	const shown: string[] = [];
 	for (const id of info.childrenById.get(parentId) ?? []) {
 		if (state.homes.has(id) && isOnPage(state, parentId, id)) {
@@ -413,7 +415,7 @@ export function defaultSize(info: GraphInfo, id: string): Size {
  * @param id The box.
  * @returns The size the user gave it, or its default size.
  */
-export function closedSize(state: LayoutState, info: GraphInfo, id: string): Size {
+function closedSize(state: LayoutState, info: GraphInfo, id: string): Size {
 	return state.closedSizes.get(id) ?? defaultSize(info, id);
 }
 
@@ -666,7 +668,7 @@ function stripRoom(state: LayoutState, info: GraphInfo, id: string): { left: num
  * @param id The open box.
  * @returns The size reaching its page's far edges or its furthest child, plus padding and room for its name.
  */
-export function fitSize(state: LayoutState, info: GraphInfo, id: string): Size {
+function fitSize(state: LayoutState, info: GraphInfo, id: string): Size {
 	let right = 0;
 	let bottom = 0;
 	const page = state.pages.get(id);
@@ -996,8 +998,8 @@ export function growToFit(state: LayoutState, info: GraphInfo, id: string): void
 }
 
 // the smallest a box can be resized to: room for an arrow and a few letters, and for an open box, its title strip
-export const MIN_BOX_WIDTH = 60;
-export const MIN_BOX_HEIGHT = 28;
+const MIN_BOX_WIDTH = 60;
+const MIN_BOX_HEIGHT = 28;
 
 /**
  * Gives a box a size the user chose, moving its neighbors to make room (or take back room) as it changes.

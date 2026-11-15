@@ -1,7 +1,7 @@
 import { Edge, ROOT_ID } from '../graph/types';
 import { getLineage } from '../analysis/lookups';
-import { findChildContaining, isInside } from '../analysis/edges';
-import { Position, Rect } from './geometry';
+import { isInside } from '../analysis/edges';
+import { overlapsWithGap, Position, Rect } from './geometry';
 import { arrangeShown, boxSize, childOrigin, GraphInfo, HEADER, LayoutState, PADDING, STRIP_THICKNESS, StripSide } from './state';
 
 /**
@@ -77,22 +77,6 @@ export function arrowZIndex(edge: Edge, state: LayoutState, info: GraphInfo, box
 }
 
 /**
- * Finds the deepest visible box that is a node or contains it.
- * @param id The node.
- * @param info The graph lookups.
- * @param rects Every visible box, from placeBoxes.
- * @returns The box's id, or undefined if even the node's top-level ancestor is hidden.
- */
-function visibleBoxContaining(id: string, info: GraphInfo, rects: Map<string, Rect>): string | undefined {
-	for (const ancestorId of getLineage(id, info.nodesById)) {
-		if (rects.has(ancestorId)) {
-			return ancestorId;
-		}
-	}
-	return undefined;
-}
-
-/**
  * Turns an arrow end into the node it stands for: a strip's box for a strip, and the node itself otherwise.
  * @param id An edge end: a node's id, or a strip's id from stripId.
  * @returns A node's id, safe to look up or walk the lineage of.
@@ -127,9 +111,11 @@ export function arrowTouches(edge: VisibleEdge, id: string, info: GraphInfo): bo
  * @param edge The arrow's edge, between visible boxes or strips.
  * @param info The graph lookups.
  * @param rects Every visible box, from placeBoxes.
+ * @param area Where the arrow is; boxes that don't overlap it are left out, since the arrow can't pass under them.
+ *   Leave it out to check every box.
  * @returns The ids of the boxes it passes under.
  */
-export function boxesUnderArrow(edge: Edge, info: GraphInfo, rects: Map<string, Rect>): string[] {
+export function boxesUnderArrow(edge: Edge, info: GraphInfo, rects: Map<string, Rect>, area?: Rect): string[] {
 	// its ends, and every box around them; a strip end counts as its box
 	const holding = new Set<string>();
 	for (const end of [edge.from, edge.to]) {
@@ -140,56 +126,16 @@ export function boxesUnderArrow(edge: Edge, info: GraphInfo, rects: Map<string, 
 
 	// the outermost of the rest: boxes whose parent holds an end (the root holds everything)
 	const under: string[] = [];
-	for (const id of rects.keys()) {
+	for (const [id, rect] of rects) {
+		if (area !== undefined && !overlapsWithGap(rect, area, 0)) {
+			continue;
+		}
 		const parentId = info.nodesById.get(id)!.parent!;
 		if (!holding.has(id) && holding.has(parentId)) {
 			under.push(id);
 		}
 	}
 	return under;
-}
-
-/**
- * Finds the strip hiding a node, among one box's strips.
- * @param id The hidden node, or something inside it.
- * @param ownerId The open box it's hidden in.
- * @param info The graph lookups.
- * @param strips Every strip, from placeStrips.
- * @returns The strip's id, or undefined if none of the box's strips hides it.
- */
-function stripHiding(id: string, ownerId: string, info: GraphInfo, strips: Strip[]): string | undefined {
-	const child = findChildContaining(id, ownerId, info.nodesById);
-	for (const strip of strips) {
-		if (strip.ownerId === ownerId && child !== undefined && strip.hiddenIds.includes(child)) {
-			return strip.id;
-		}
-	}
-	return undefined;
-}
-
-/**
- * Finds what an edge end attaches to: the deepest visible box holding it, or, when it's hidden, the strip it's behind.
- * @param id The edge end, a node in the graph.
- * @param state The view state.
- * @param info The graph lookups.
- * @param rects Every visible box.
- * @param strips Every strip.
- * @returns A box's or strip's id, or undefined if the end can't be shown at all.
- */
-export function visibleEndpointOf(id: string, state: LayoutState, info: GraphInfo, rects: Map<string, Rect>, strips: Strip[]): string | undefined {
-	const box = visibleBoxContaining(id, info, rects);
-
-	// not even its top-level box is shown, so it's behind the root's strip, if any
-	if (box === undefined) {
-		return stripHiding(id, ROOT_ID, info, strips);
-	}
-
-	// landing on an open box means it's hidden inside it, behind one of its strips
-	if (state.expanded.has(box)) {
-		return stripHiding(id, box, info, strips);
-	}
-
-	return box;
 }
 
 /**
@@ -210,51 +156,102 @@ function commonAncestor(a: string, b: string, info: GraphInfo): string {
 }
 
 /**
- * Moves an arrow end up to its folder at a depth, when it's deeper. A strip counts as one level inside its box, since it
- * stands for that box's children.
- * @param end A box's or strip's id.
- * @param depth The deepest it may be, where top-level boxes are 1.
- * @param info The graph lookups.
- * @returns The end, or its folder at that depth.
- */
-function endAtDepth(end: string, depth: number, info: GraphInfo): string {
-	// the lineage runs from the node up to the root, so a node at depth d has d + 1 entries
-	const nodeId = nodeOfEnd(end);
-	const lineage = getLineage(nodeId, info.nodesById);
-	let endDepth = lineage.length - 1;
-	if (end !== nodeId) {
-		endDepth++;
-	}
-	if (endDepth <= depth) {
-		return end;
-	}
-	return lineage[lineage.length - 1 - depth];
-}
-
-/**
- * Finds what an edge's two ends attach to: the visible box or strip holding each, grouped so neither is more than
- * maxDepth levels below the folder the edge lives in.
- * @param edge An edge in the graph.
+ * Finds what edges' ends attach to on screen, remembering what it's worked out, so the many edges that start or end in
+ * the same boxes cost almost nothing after the first. Only good for one drawing, since it's built from that drawing's
+ * boxes and strips.
  * @param state The view state.
  * @param info The graph lookups.
- * @param rects Every visible box.
- * @param strips Every strip.
- * @param maxDepth How many levels below the edge's folder its ends may go; Infinity for no limit.
- * @returns Both ends' box or strip ids, or undefined if either can't be shown at all.
+ * @param rects Every visible box, from placeBoxes.
+ * @param strips Every strip, from placeStrips.
+ * @returns A function giving an edge's two ends (each a box's or strip's id), grouped so neither is more than maxDepth
+ *   levels below the folder the edge lives in (Infinity for no limit), or undefined if either can't be shown at all.
  */
-export function arrowEndsOf(edge: Edge, state: LayoutState, info: GraphInfo, rects: Map<string, Rect>, strips: Strip[], maxDepth: number): { from: string; to: string } | undefined {
-	let from = visibleEndpointOf(edge.from, state, info, rects, strips);
-	let to = visibleEndpointOf(edge.to, state, info, rects, strips);
-	if (from === undefined || to === undefined) {
-		return undefined;
+function makeArrowEndFinder(state: LayoutState, info: GraphInfo, rects: Map<string, Rect>, strips: Strip[]): (edge: Edge, maxDepth: number) => { from: string; to: string } | undefined {
+	// which strip hides each hidden child; a child has one parent, so it's behind one strip at most
+	const stripOfChild = new Map<string, string>();
+	for (const strip of strips) {
+		for (const id of strip.hiddenIds) {
+			stripOfChild.set(id, strip.id);
+		}
 	}
-	// the folder it lives in has depth (its lineage's length - 1); the ends may go maxDepth below that. With no limit
-	// (Infinity), every end is already within it
-	const home = commonAncestor(edge.from, edge.to, info);
-	const limit = getLineage(home, info.nodesById).length - 1 + maxDepth;
-	from = endAtDepth(from, limit, info);
-	to = endAtDepth(to, limit, info);
-	return { from: from, to: to };
+
+	// each node's depth, where the root is 0 and top-level nodes are 1, worked out from its parent's
+	const depths = new Map<string, number>();
+	function depthOf(id: string): number {
+		const known = depths.get(id);
+		if (known !== undefined) {
+			return known;
+		}
+		const parentId = info.nodesById.get(id)!.parent;
+		const depth = parentId === null ? 0 : depthOf(parentId) + 1;
+		depths.set(id, depth);
+		return depth;
+	}
+
+	// a node's ancestor at a depth no deeper than its own, by climbing from it
+	function ancestorAt(id: string, depth: number): string {
+		let currentId = id;
+		while (depthOf(currentId) > depth) {
+			currentId = info.nodesById.get(currentId)!.parent!;
+		}
+		return currentId;
+	}
+
+	// what each node attaches to: its deepest visible box, or, when that box is open (so the node is hidden inside it),
+	// the strip hiding the box's child that holds it; undefined when there's no such strip
+	const endpoints = new Map<string, string | undefined>();
+	function endpointOf(id: string): string | undefined {
+		if (endpoints.has(id)) {
+			return endpoints.get(id);
+		}
+		let box: string | undefined = undefined;
+		for (const ancestorId of getLineage(id, info.nodesById)) {
+			if (rects.has(ancestorId)) {
+				box = ancestorId;
+				break;
+			}
+		}
+		// not even its top-level box is shown, so it's behind the root's strip, if any
+		const owner = box === undefined ? ROOT_ID : box;
+		let endpoint: string | undefined = box;
+		if (box === undefined || state.expanded.has(box)) {
+			endpoint = depthOf(id) > depthOf(owner) ? stripOfChild.get(ancestorAt(id, depthOf(owner) + 1)) : undefined;
+		}
+		endpoints.set(id, endpoint);
+		return endpoint;
+	}
+
+	// how deep an end is; a strip counts as one level inside its box, since it stands for that box's children
+	function endDepth(end: string): number {
+		const nodeId = nodeOfEnd(end);
+		return end === nodeId ? depthOf(nodeId) : depthOf(nodeId) + 1;
+	}
+
+	// an end moved up to its folder at a depth, when it's deeper
+	function endAtDepth(end: string, depth: number): string {
+		if (endDepth(end) <= depth) {
+			return end;
+		}
+		return ancestorAt(nodeOfEnd(end), depth);
+	}
+
+	return function arrowEnds(edge: Edge, maxDepth: number): { from: string; to: string } | undefined {
+		const from = endpointOf(edge.from);
+		const to = endpointOf(edge.to);
+		if (from === undefined || to === undefined) {
+			return undefined;
+		}
+
+		// the folder the edge lives in is at least the root, so ends no deeper than maxDepth are always within the
+		// limit, and the folder isn't needed. With no limit (Infinity), that's every end
+		if (endDepth(from) <= maxDepth && endDepth(to) <= maxDepth) {
+			return { from: from, to: to };
+		}
+
+		// otherwise the ends may go maxDepth below that folder
+		const limit = depthOf(commonAncestor(edge.from, edge.to, info)) + maxDepth;
+		return { from: endAtDepth(from, limit), to: endAtDepth(to, limit) };
+	};
 }
 
 // one row in the sidebar's lists of what a box connects to: a node, how many imports go through it, and the rows
@@ -374,9 +371,10 @@ export interface VisibleEdge extends Edge {
 export function visibleEdges(state: LayoutState, info: GraphInfo, rects: Map<string, Rect>, strips: Strip[] = [], maxDepth: number = Infinity): VisibleEdge[] {
 	// one per pair of ends, in the order first seen, counting the edges that land on it
 	const byEnds = new Map<string, VisibleEdge>();
+	const arrowEnds = makeArrowEndFinder(state, info, rects, strips);
 
 	for (const edge of info.edges) {
-		const ends = arrowEndsOf(edge, state, info, rects, strips, maxDepth);
+		const ends = arrowEnds(edge, maxDepth);
 		if (ends === undefined) {
 			continue;
 		}

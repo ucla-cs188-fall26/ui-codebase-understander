@@ -1,7 +1,7 @@
 import { Position, Rect } from './geometry';
 
 // how far you can zoom out and in
-export const MIN_SCALE = 0.2;
+const MIN_SCALE = 0.2;
 export const MAX_SCALE = 3;
 
 // how the world is shown on screen: shifted by x and y pixels, then magnified by scale
