@@ -1,15 +1,15 @@
 import { Edge, ROOT_ID } from '../graph/types';
 import { getLineage } from '../analysis/lookups';
 import { findChildContaining, isInside } from '../analysis/edges';
-import { GAP } from './defaultLayout';
-import { boundsOf, Position, Rect } from './geometry';
-import { arrangeShown, childOrigin, GraphInfo, LayoutState, STRIP_THICKNESS } from './state';
+import { Position, Rect } from './geometry';
+import { arrangeShown, boxSize, childOrigin, GraphInfo, HEADER, LayoutState, PADDING, STRIP_THICKNESS, StripSide } from './state';
 
 /**
- * Works out where every visible box sits on the page, from homes that are relative to their parents.
+ * Works out where every visible box sits on the page, from homes that are relative to their parents. The root is a box
+ * too, around everything.
  * @param state The view state. Every open box's shown children must have homes.
  * @param info The graph lookups.
- * @param origin Where the root's children are measured from on the page.
+ * @param origin Where the root's top-left goes on the page.
  * @returns Every visible box's page rect, parents before their children, which is also the order to paint them.
  */
 export function placeBoxes(state: LayoutState, info: GraphInfo, origin: Position): Map<string, Rect> {
@@ -21,16 +21,19 @@ export function placeBoxes(state: LayoutState, info: GraphInfo, origin: Position
 			const rect = { x: inside.x + arranged.x, y: inside.y + arranged.y, width: arranged.width, height: arranged.height };
 			rects.set(id, rect);
 
-			// an open box's children sit inside it, below its name
+			// an open box's children sit inside it, below its name, past any strip on its left or top
 			if (state.expanded.has(id)) {
-				const offset = childOrigin();
+				const offset = childOrigin(state, info, id);
 				placeChildren(id, { x: rect.x + offset.x, y: rect.y + offset.y });
 			}
 		}
 	}
 
-	// the root has no box of its own, so its children start right at the origin
-	placeChildren(ROOT_ID, origin);
+	// the root's box, then everything inside it
+	const rootSize = boxSize(state, info, ROOT_ID);
+	rects.set(ROOT_ID, { x: origin.x, y: origin.y, width: rootSize.width, height: rootSize.height });
+	const rootOffset = childOrigin(state, info, ROOT_ID);
+	placeChildren(ROOT_ID, { x: origin.x + rootOffset.x, y: origin.y + rootOffset.y });
 	return rects;
 }
 
@@ -63,7 +66,7 @@ export function arrowZIndex(edge: Edge, state: LayoutState, info: GraphInfo, box
 	for (const end of [edge.from, edge.to]) {
 		// a strip end counts as its box, which is open, so the arrow sits just above it
 		for (const ancestorId of getLineage(nodeOfEnd(end), info.nodesById)) {
-			// the root is open but has no box, so it has no z-index and is skipped
+			// every open box holding an end counts, the root included
 			const z = boxZ.get(ancestorId);
 			if (z !== undefined && state.expanded.has(ancestorId)) {
 				highest = Math.max(highest, z);
@@ -303,7 +306,7 @@ export function visibleEdges(state: LayoutState, info: GraphInfo, rects: Map<str
 	return Array.from(byEnds.values());
 }
 
-export type StripSide = 'right' | 'bottom';
+export type { StripSide };
 
 // a "+N" bar along a box's edge, standing in for the children it's hiding on that side
 export interface Strip {
@@ -326,9 +329,9 @@ export function stripId(ownerId: string, side: StripSide): string {
 }
 
 /**
- * Works out where every strip goes: inside each open box hiding children on that side, one padding in from its right
- * or bottom edge, in room the box keeps for it, so the padding is even all around; and for the root, just below the
- * top-level boxes.
+ * Works out where every strip goes: inside each open box hiding children on that side, one padding in from that edge,
+ * in room the box keeps for it, so the padding is even all around; and for the root, just below the top-level boxes.
+ * Side strips run between the top and bottom ones, and top and bottom strips between the side ones, so none overlap.
  * @param state The view state.
  * @param info The graph lookups.
  * @param rects Every visible box, from placeBoxes.
@@ -337,69 +340,70 @@ export function stripId(ownerId: string, side: StripSide): string {
 export function placeStrips(state: LayoutState, info: GraphInfo, rects: Map<string, Rect>): Strip[] {
 	const strips: Strip[] = [];
 
-	// childOrigin's x is the padding, and its y is the title plus the padding
-	const origin = childOrigin();
-	const padding = origin.x;
-	const title = origin.y - origin.x;
-
-	// a strip and the padding before it; where both strips are there, each stops short of the other's corner
-	const room = STRIP_THICKNESS + padding;
+	// a strip and the padding before it, which a strip on the next side over stops short of
+	const room = STRIP_THICKNESS + PADDING;
 
 	for (const id of state.expanded) {
 		const box = rects.get(id);
-		if (id === ROOT_ID || box === undefined) {
+		if (box === undefined) {
 			continue;
 		}
 
 		const shown = arrangeShown(state, info, id);
-		const hasRight = shown.hiddenRight.length > 0;
-		const hasBottom = shown.hiddenBottom.length > 0;
-		if (hasRight) {
+		const hidden = { left: shown.hiddenLeft, right: shown.hiddenRight, top: shown.hiddenTop, bottom: shown.hiddenBottom };
+		const leftRoom = hidden.left.length > 0 ? room : 0;
+		const rightRoom = hidden.right.length > 0 ? room : 0;
+		const topRoom = hidden.top.length > 0 ? room : 0;
+		const bottomRoom = hidden.bottom.length > 0 ? room : 0;
+
+		// the space strips go in: inside the padding, below the title
+		const inside = { x: box.x + PADDING, y: box.y + HEADER + PADDING, width: box.width - 2 * PADDING, height: box.height - HEADER - 2 * PADDING };
+
+		// side strips: full height between the top and bottom strips
+		const sideY = inside.y + topRoom;
+		const sideHeight = inside.height - topRoom - bottomRoom;
+		if (leftRoom > 0) {
+			strips.push({
+				id: stripId(id, 'left'),
+				ownerId: id,
+				side: 'left',
+				rect: { x: inside.x, y: sideY, width: STRIP_THICKNESS, height: sideHeight },
+				hiddenIds: hidden.left,
+			});
+		}
+		if (rightRoom > 0) {
 			strips.push({
 				id: stripId(id, 'right'),
 				ownerId: id,
 				side: 'right',
-				rect: {
-					x: box.x + box.width - padding - STRIP_THICKNESS,
-					y: box.y + title + padding,
-					width: STRIP_THICKNESS,
-					height: box.height - title - 2 * padding - (hasBottom ? room : 0),
-				},
-				hiddenIds: shown.hiddenRight,
+				rect: { x: inside.x + inside.width - STRIP_THICKNESS, y: sideY, width: STRIP_THICKNESS, height: sideHeight },
+				hiddenIds: hidden.right,
 			});
 		}
-		if (hasBottom) {
+
+		// top and bottom strips: full width between the side strips
+		const acrossX = inside.x + leftRoom;
+		const acrossWidth = inside.width - leftRoom - rightRoom;
+		if (topRoom > 0) {
+			strips.push({
+				id: stripId(id, 'top'),
+				ownerId: id,
+				side: 'top',
+				rect: { x: acrossX, y: inside.y, width: acrossWidth, height: STRIP_THICKNESS },
+				hiddenIds: hidden.top,
+			});
+		}
+		if (bottomRoom > 0) {
 			strips.push({
 				id: stripId(id, 'bottom'),
 				ownerId: id,
 				side: 'bottom',
-				rect: {
-					x: box.x + padding,
-					y: box.y + box.height - padding - STRIP_THICKNESS,
-					width: box.width - 2 * padding - (hasRight ? room : 0),
-					height: STRIP_THICKNESS,
-				},
-				hiddenIds: shown.hiddenBottom,
+				rect: { x: acrossX, y: inside.y + inside.height - STRIP_THICKNESS, width: acrossWidth, height: STRIP_THICKNESS },
+				hiddenIds: hidden.bottom,
 			});
 		}
 	}
 
-	// the root has no box: nodes outside the flow wait in a strip just below the top-level boxes, as wide as them
-	const rootShown = arrangeShown(state, info, ROOT_ID);
-	const topLevel: Rect[] = [];
-	for (const id of rootShown.rects.keys()) {
-		topLevel.push(rects.get(id)!);
-	}
-	const bounds = boundsOf(topLevel);
-	if (rootShown.hiddenBottom.length > 0 && bounds !== undefined) {
-		strips.push({
-			id: stripId(ROOT_ID, 'bottom'),
-			ownerId: ROOT_ID,
-			side: 'bottom',
-			rect: { x: bounds.x, y: bounds.y + bounds.height + GAP, width: bounds.width, height: STRIP_THICKNESS },
-			hiddenIds: rootShown.hiddenBottom,
-		});
-	}
 
 	return strips;
 }

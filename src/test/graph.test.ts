@@ -9,7 +9,7 @@ import { defaultLayout, GAP } from '../layout/defaultLayout';
 import { arrowHead, arrowPath, arrowWidth, chooseSides, placeArrows } from '../layout/arrows';
 import { fitCamera, MAX_SCALE, zoomAt } from '../layout/camera';
 import { boundsOf } from '../layout/geometry';
-import { arrangeChildren, arrangeShown, boxSize, changeSize, buildGraphInfo, childOrigin, closeNode, copyLayoutState, createLayoutState, defaultSize, GraphInfo, LayoutState, moveTo, openNode, resetNode, resizeTo, showMoreFromStrip } from '../layout/state';
+import { arrangeChildren, arrangeShown, boxSize, changeSize, buildGraphInfo, childOrigin, closeNode, copyLayoutState, createLayoutState, defaultSize, GraphInfo, LayoutState, moveTo, openNode, PADDING, resetNode, resizeTo, turnPage } from '../layout/state';
 import { arrowTouches, arrowZIndex, boxesUnderArrow, boxZIndexes, placeBoxes, placeStrips, stripId, visibleEdges } from '../layout/place';
 import { fromSaved, toSaved } from '../layout/saved';
 import { dragTo, dropAt, settleDrop } from '../layout/drop';
@@ -700,8 +700,8 @@ suite('placing boxes', () => {
 		const src = rects.get('src')!;
 		const a = rects.get('src/a.ts')!;
 		const home = state.homes.get('src/a.ts')!;
-		assert.strictEqual(a.x, src.x + childOrigin().x + home.x);
-		assert.strictEqual(a.y, src.y + childOrigin().y + home.y);
+		assert.strictEqual(a.x, src.x + childOrigin(state, info, 'src').x + home.x);
+		assert.strictEqual(a.y, src.y + childOrigin(state, info, 'src').y + home.y);
 	});
 
 	test('gives no box to children of a closed box', () => {
@@ -783,7 +783,7 @@ suite('settleDrop', () => {
 		assert.deepStrictEqual(state.homes.get('b.ts'), { x: 200, y: 20 + GAP });
 	});
 
-	test('pushes left at the top level, where there is no edge', () => {
+	test('pushes left at the top level, when there\'s room before the edge', () => {
 		const { info, state } = makeBoxes([['a.ts', { x: 240, y: 20 }], ['b.ts', { x: 200, y: 0 }]]);
 
 		settleDrop(state, info, 'a.ts');
@@ -930,10 +930,10 @@ suite('resizeTo', () => {
 		openNode(state, info, 'src');
 		resizeTo(state, info, 'src', { width: 10, height: 10 });
 		const children = arrangeChildren(state, info, 'src');
-		const origin = childOrigin();
+		const origin = childOrigin(state, info, 'src');
 		assert.deepStrictEqual(state.openSizes.get('src'), {
-			width: origin.x + minSquishWidth(children) + origin.x,
-			height: origin.y + minSquishHeight(children) + origin.x,
+			width: origin.x + minSquishWidth(children) + PADDING,
+			height: origin.y + minSquishHeight(children) + PADDING,
 		});
 		assert.ok(!state.closedSizes.has('src'));
 	});
@@ -978,9 +978,9 @@ suite('arrangeShown', () => {
 	});
 });
 
-suite('showing more from a strip', () => {
+suite('pages', () => {
 	// a directory with some files and, at the top level, a file below it; nothing imports anything, so the directory's
-	// files stack in one column and the ones past the limit wait behind the bottom strip
+	// files stack in one column, and its first page holds the first CHILD_LIMIT of them
 	function makeFolder(fileCount: number) {
 		const paths: string[] = ['q.ts'];
 		for (let i = 1; i <= fileCount; i++) {
@@ -993,87 +993,98 @@ suite('showing more from a strip', () => {
 		return { info: info, state: state };
 	}
 
-	test('shows the children behind the strip, and the strip goes away', () => {
+	test('opening a directory gives every child a home, and shows the first page', () => {
 		const { info, state } = makeFolder(7);
 
-		showMoreFromStrip(state, info, 'p', 'bottom');
 		const shown = arrangeShown(state, info, 'p');
 
-		assert.strictEqual(shown.rects.size, 7);
-		assert.deepStrictEqual(shown.hiddenBottom, []);
-		assert.deepStrictEqual(shown.hiddenRight, []);
-	});
-
-	test('brings out at most CHILD_LIMIT children per click', () => {
-		const { info, state } = makeFolder(12);
-
-		showMoreFromStrip(state, info, 'p', 'bottom');
-		const shown = arrangeShown(state, info, 'p');
-
-		assert.strictEqual(shown.rects.size, 2 * CHILD_LIMIT);
-		assert.strictEqual(shown.hiddenBottom.length, 2);
-	});
-
-	test('grows a squished directory back to fit before bringing out more', () => {
-		const { info, state } = makeFolder(7);
-		const fits = boxSize(state, info, 'p');
-		resizeTo(state, info, 'p', { width: fits.width, height: 0 });
-
-		showMoreFromStrip(state, info, 'p', 'bottom');
-		const shown = arrangeShown(state, info, 'p');
-
-		assert.ok(!state.openSizes.has('p'));
+		for (const id of info.childrenById.get('p')!) {
+			assert.ok(state.homes.has(id));
+		}
 		assert.strictEqual(shown.rects.size, CHILD_LIMIT);
 		assert.strictEqual(shown.hiddenBottom.length, 2);
 	});
 
-	test('moves a box below the directory down by exactly how much it grew', () => {
+	test('clicking the bottom strip turns to the next page, and the first page waits behind a top strip', () => {
+		const { info, state } = makeFolder(7);
+		const homesBefore = new Map(state.homes);
+
+		turnPage(state, info, 'p', 'bottom');
+		const shown = arrangeShown(state, info, 'p');
+
+		assert.deepStrictEqual(Array.from(shown.rects.keys()).toSorted(), ['p/f16.ts', 'p/f17.ts']);
+		assert.strictEqual(shown.hiddenTop.length, CHILD_LIMIT);
+		assert.deepStrictEqual(shown.hiddenBottom, []);
+		// turning the page moves nothing inside the directory
+		for (const id of info.childrenById.get('p')!) {
+			assert.deepStrictEqual(state.homes.get(id), homesBefore.get(id));
+		}
+	});
+
+	test('draws the next page from the top-left of the directory', () => {
+		const { info, state } = makeFolder(7);
+
+		turnPage(state, info, 'p', 'bottom');
+		const shown = arrangeShown(state, info, 'p');
+
+		let top = Infinity;
+		for (const rect of shown.rects.values()) {
+			top = Math.min(top, rect.y);
+		}
+		assert.ok(top >= 0);
+		assert.ok(top < state.pages.get('p')!.size.height);
+	});
+
+	test('every page holds as many boxes as the first, with no gap at its top', () => {
+		const { info, state } = makeFolder(10);
+
+		turnPage(state, info, 'p', 'bottom');
+		const shown = arrangeShown(state, info, 'p');
+
+		assert.strictEqual(shown.rects.size, CHILD_LIMIT);
+		let top = Infinity;
+		for (const rect of shown.rects.values()) {
+			top = Math.min(top, rect.y);
+		}
+		assert.strictEqual(top, 0);
+	});
+
+	test('clicking the top strip turns back', () => {
+		const { info, state } = makeFolder(7);
+		turnPage(state, info, 'p', 'bottom');
+
+		turnPage(state, info, 'p', 'top');
+		const shown = arrangeShown(state, info, 'p');
+
+		assert.strictEqual(shown.rects.size, CHILD_LIMIT);
+		assert.deepStrictEqual(shown.hiddenTop, []);
+	});
+
+	test('turning a page keeps the directory\'s size, so nothing around it moves', () => {
 		const { info, state } = makeFolder(7);
 		const sizeBefore = boxSize(state, info, 'p');
 		const homeBefore = state.homes.get('q.ts')!;
 
-		showMoreFromStrip(state, info, 'p', 'bottom');
+		// the second page has only two boxes, but the directory stays the size of a page
+		turnPage(state, info, 'p', 'bottom');
 
-		const grown = boxSize(state, info, 'p').height - sizeBefore.height;
-		assert.ok(grown > 0);
-		assert.strictEqual(state.homes.get('q.ts')!.y, homeBefore.y + grown);
+		assert.deepStrictEqual(boxSize(state, info, 'p'), sizeBefore);
+		assert.deepStrictEqual(state.homes.get('q.ts'), homeBefore);
 	});
 
-	test('stacks children from the bottom strip in one column below every box that was there', () => {
+	test('a child dropped far past the page\'s edge stays on its page, and the directory grows', () => {
 		const { info, state } = makeFolder(7);
-		const before = arrangeChildren(state, info, 'p');
-		let left = Infinity;
-		let bottom = 0;
-		for (const rect of before.values()) {
-			left = Math.min(left, rect.x);
-			bottom = Math.max(bottom, rect.y + rect.height);
-		}
+		const before = boxSize(state, info, 'p');
 
-		showMoreFromStrip(state, info, 'p', 'bottom');
+		dropAt(state, info, 'p/f11.ts', { x: 0, y: 5000 });
 
-		for (const [id, rect] of arrangeChildren(state, info, 'p')) {
-			if (!before.has(id)) {
-				assert.strictEqual(rect.x, left);
-				assert.ok(rect.y > bottom);
-			}
-		}
+		assert.ok(arrangeShown(state, info, 'p').rects.has('p/f11.ts'));
+		assert.ok(boxSize(state, info, 'p').height > before.height);
 	});
 
-	test('can still be squished down to 3 after bringing children out', () => {
+	test('resetting the directory puts it back on its first page', () => {
 		const { info, state } = makeFolder(7);
-		showMoreFromStrip(state, info, 'p', 'bottom');
-		const fits = boxSize(state, info, 'p');
-
-		resizeTo(state, info, 'p', { width: fits.width, height: 0 });
-		const shown = arrangeShown(state, info, 'p');
-
-		assert.strictEqual(shown.rects.size, 3);
-		assert.strictEqual(shown.hiddenBottom.length, 4);
-	});
-
-	test('resetting the directory puts the children back behind the strip', () => {
-		const { info, state } = makeFolder(7);
-		showMoreFromStrip(state, info, 'p', 'bottom');
+		turnPage(state, info, 'p', 'bottom');
 
 		resetNode(state, info, 'p');
 		const shown = arrangeShown(state, info, 'p');
@@ -1113,7 +1124,7 @@ suite('resizing inside a directory', () => {
 		resizeTo(state, info, 'p', { width: 0, height: 0 });
 
 		// the inside ends one padding above the bottom; childOrigin's x is the padding
-		const insideHeight = boxSize(state, info, 'p').height - childOrigin().y - childOrigin().x;
+		const insideHeight = boxSize(state, info, 'p').height - childOrigin(state, info, 'p').y - PADDING;
 		for (const rect of arrangeShown(state, info, 'p').rects.values()) {
 			assert.ok(rect.y + rect.height <= insideHeight);
 		}
@@ -1281,13 +1292,13 @@ suite('moveTo', () => {
 		assert.deepStrictEqual(state.homes.get('src/a.ts'), { x: 0, y: 0 });
 	});
 
-	test('lets a box at the top level go anywhere, since the page has no edges', () => {
+	test('stops a top-level box at the root\'s left and top edge, like any directory\'s', () => {
 		const info = makeInfo();
 		const state = createLayoutState();
 
 		moveTo(state, info, 'src', { x: -50, y: -10 });
 
-		assert.deepStrictEqual(state.homes.get('src'), { x: -50, y: -10 });
+		assert.deepStrictEqual(state.homes.get('src'), { x: 0, y: 0 });
 	});
 });
 
@@ -1462,7 +1473,7 @@ suite('placeStrips', () => {
 
 		// one padding in from the box's right edge, and every child at least one padding before the strip
 		const box = rects.get('p')!;
-		const padding = childOrigin().x;
+		const padding = PADDING;
 		assert.strictEqual(strips[0].rect.x + strips[0].rect.width, box.x + box.width - padding);
 		for (const child of childRects(rects)) {
 			assert.ok(child.x + child.width <= strips[0].rect.x - padding);
@@ -1481,14 +1492,14 @@ suite('placeStrips', () => {
 		// the two past the limit, which would be below anyway, plus the two the squish hid
 		assert.strictEqual(bottom.hiddenIds.length, 4);
 		const box = rects.get('p')!;
-		const padding = childOrigin().x;
+		const padding = PADDING;
 		assert.strictEqual(bottom.rect.y + bottom.rect.height, box.y + box.height - padding);
 		for (const child of childRects(rects)) {
 			assert.ok(child.y + child.height <= bottom.rect.y - padding);
 		}
 	});
 
-	test('shows every top-level node in the flow, and only 5 of the rest, with a strip below for them', () => {
+	test('the root\'s first page shows every top-level node in the flow and 5 of the rest, the others behind its strip', () => {
 		// a imports b; seven other files import nothing and nothing imports them
 		const paths = ['a.ts', 'b.ts'];
 		for (let i = 1; i <= 7; i++) {
@@ -1499,16 +1510,35 @@ suite('placeStrips', () => {
 		openNode(state, info, ROOT_ID);
 		const rects = placeBoxes(state, info, { x: 0, y: 0 });
 
-		assert.ok(rects.has('a.ts') && rects.has('b.ts'));
-		assert.strictEqual(rects.size, 2 + 5);
+		// the root's own box, plus the two in the flow and five others
+		assert.ok(rects.has(ROOT_ID) && rects.has('a.ts') && rects.has('b.ts'));
+		assert.strictEqual(rects.size, 1 + 2 + 5);
 
+		// the other two wait inside the root, below its boxes
 		const strips = placeStrips(state, info, rects);
 		assert.strictEqual(strips.length, 1);
 		assert.strictEqual(strips[0].ownerId, ROOT_ID);
 		assert.strictEqual(strips[0].side, 'bottom');
 		assert.strictEqual(strips[0].hiddenIds.length, 2);
-		for (const rect of rects.values()) {
-			assert.ok(strips[0].rect.y > rect.y + rect.height);
+		const root = rects.get(ROOT_ID)!;
+		for (const [id, rect] of rects) {
+			if (id !== ROOT_ID) {
+				assert.ok(strips[0].rect.y > rect.y + rect.height);
+			}
+		}
+		assert.ok(strips[0].rect.y + strips[0].rect.height < root.y + root.height);
+	});
+
+	test('lays out the root\'s nodes in the flow first, and the rest below them', () => {
+		const paths = ['a.ts', 'b.ts', 'readme.md'];
+		const info = buildGraphInfo({ nodes: buildTree('repo', paths), edges: [edge('a.ts', 'b.ts')] });
+		const state = createLayoutState();
+		openNode(state, info, ROOT_ID);
+
+		const readme = state.homes.get('readme.md')!;
+		for (const id of ['a.ts', 'b.ts']) {
+			const home = state.homes.get(id)!;
+			assert.ok(readme.y >= home.y + boxSize(state, info, id).height);
 		}
 	});
 
@@ -1550,9 +1580,11 @@ suite('paint order', () => {
 
 		const boxZ = boxZIndexes(placeBoxes(state, info, { x: 0, y: 0 }));
 
-		assert.strictEqual(boxZ.get('src'), 2);
-		assert.ok(boxZ.get('src/a.ts')! > 2);
-		assert.ok(boxZ.get('src/lib')! > 2);
+		// the root first, around everything, then src, then what's in src
+		assert.strictEqual(boxZ.get(ROOT_ID), 2);
+		assert.ok(boxZ.get('src')! > boxZ.get(ROOT_ID)!);
+		assert.ok(boxZ.get('src/a.ts')! > boxZ.get('src')!);
+		assert.ok(boxZ.get('src/lib')! > boxZ.get('src')!);
 	});
 
 	test('paints an arrow just above the open box holding its ends', () => {
@@ -1567,14 +1599,14 @@ suite('paint order', () => {
 		assert.strictEqual(z, boxZ.get('src')! + 1);
 	});
 
-	test('paints an arrow below every box when no open box holds its ends', () => {
+	test('paints an arrow between top-level boxes just above the root, below every other box', () => {
 		const nodes = buildTree('repo', ['src/a.ts', 'top.ts']);
 		const info = buildGraphInfo({ nodes: nodes, edges: [] });
 		const state = createLayoutState();
 		openNode(state, info, ROOT_ID);
 		const boxZ = boxZIndexes(placeBoxes(state, info, { x: 0, y: 0 }));
 
-		assert.strictEqual(arrowZIndex(edge('src', 'top.ts'), state, info, boxZ), 1);
+		assert.strictEqual(arrowZIndex(edge('src', 'top.ts'), state, info, boxZ), boxZ.get(ROOT_ID)! + 1);
 	});
 
 	// top.ts and two open directories: app holds db.ts and a closed api, and other holds y.ts

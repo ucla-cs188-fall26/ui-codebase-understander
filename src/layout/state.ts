@@ -17,11 +17,28 @@ export interface GraphInfo {
 	topLevelShown: string[]; // the top-level nodes that get a box, most important first
 }
 
+// a page's place in a directory's layout: how many pages across and down it is from the top-left one
+export interface PageCell {
+	column: number;
+	row: number;
+}
+
+// which page a directory shows, and how big its pages are, in its layout's coordinates
+export interface Page {
+	column: number;
+	row: number;
+	size: Size;
+}
+
+// the four sides of a box, where its strips can be
+export type StripSide = 'left' | 'right' | 'top' | 'bottom';
+
 // everything about the view that can differ from the default; deleting an entry brings the default back
 export interface LayoutState {
 	expanded: Set<string>; // open nodes; the root is always open
-	shownPastLimit: Set<string>; // children past the limit the user brought out of a strip
-	homes: Map<string, Position>; // each placed box's top-left, relative to the inside of its parent
+	homes: Map<string, Position>; // each placed box's top-left, relative to the top-left of its parent's whole layout
+	pages: Map<string, Page>; // each opened directory's current page and page size, the root's included
+	childPages: Map<string, PageCell>; // each child's page in its directory, kept until the directory is resized or reset
 	closedSizes: Map<string, Size>; // only boxes the user has resized while closed
 	openSizes: Map<string, Size>; // only boxes the user has resized while open; others fit their children
 }
@@ -55,12 +72,7 @@ export function buildGraphInfo(graph: Graph): GraphInfo {
  * @returns Every top-level node with an arrow in or out, and the first CHILD_LIMIT without, in importance order.
  */
 function chooseTopLevel(children: string[], edges: Edge[], nodesById: Map<string, Node>): string[] {
-	// part of the flow: at either end of an edge between top-level nodes, counting edges from anything inside them
-	const inFlow = new Set<string>();
-	for (const edge of liftEdges(ROOT_ID, edges, nodesById)) {
-		inFlow.add(edge.from);
-		inFlow.add(edge.to);
-	}
+	const inFlow = topLevelInFlow(edges, nodesById);
 
 	const shown: string[] = [];
 	let others = 0;
@@ -75,9 +87,25 @@ function chooseTopLevel(children: string[], edges: Edge[], nodesById: Map<string
 	return shown;
 }
 
+/**
+ * Finds the top-level nodes that are part of the flow: at either end of an edge between top-level nodes, counting
+ * edges from anything inside them.
+ * @param edges Every edge in the graph.
+ * @param nodesById Every node in the graph, by id.
+ * @returns Their ids.
+ */
+function topLevelInFlow(edges: Edge[], nodesById: Map<string, Node>): Set<string> {
+	const inFlow = new Set<string>();
+	for (const edge of liftEdges(ROOT_ID, edges, nodesById)) {
+		inFlow.add(edge.from);
+		inFlow.add(edge.to);
+	}
+	return inFlow;
+}
+
 // space between an open box's edge and its children, and room at its top for its name, in pixels
-const PADDING = 20;
-const HEADER = 32;
+export const PADDING = 20;
+export const HEADER = 32;
 
 // how thick a "+N" strip is, and the room one takes inside a box: the strip plus the padding between it and the
 // children, so the padding is even all around
@@ -85,11 +113,16 @@ export const STRIP_THICKNESS = 16;
 const STRIP_ROOM = STRIP_THICKNESS + PADDING;
 
 /**
- * Finds where an open box's children are measured from, inside the box.
- * @returns The offset from the box's top-left to its children's (0, 0).
+ * Finds where an open box's page is drawn from, inside the box: past the padding and the title, and past a strip on the
+ * left or top if it has one.
+ * @param state The view state.
+ * @param info The graph lookups.
+ * @param id The open box.
+ * @returns The offset from the box's top-left to where its page's (0, 0) is drawn.
  */
-export function childOrigin(): Position {
-	return { x: PADDING, y: HEADER + PADDING };
+export function childOrigin(state: LayoutState, info: GraphInfo, id: string): Position {
+	const room = stripRoom(state, info, id);
+	return { x: PADDING + room.left, y: HEADER + PADDING + room.top };
 }
 
 /**
@@ -99,8 +132,9 @@ export function childOrigin(): Position {
 export function createLayoutState(): LayoutState {
 	return {
 		expanded: new Set([ROOT_ID]),
-		shownPastLimit: new Set(),
 		homes: new Map(),
+		pages: new Map(),
+		childPages: new Map(),
 		closedSizes: new Map(),
 		openSizes: new Map(),
 	};
@@ -115,139 +149,156 @@ export function createLayoutState(): LayoutState {
 export function copyLayoutState(state: LayoutState): LayoutState {
 	return {
 		expanded: new Set(state.expanded),
-		shownPastLimit: new Set(state.shownPastLimit),
 		homes: new Map(state.homes),
+		pages: new Map(state.pages),
+		childPages: new Map(state.childPages),
 		closedSizes: new Map(state.closedSizes),
 		openSizes: new Map(state.openSizes),
 	};
 }
 
+
 /**
- * Lists the children of a node that get a box before the user brings out any more: the ones within the limit.
- * @param info The graph lookups.
- * @param parentId The node whose children we want.
- * @returns Up to CHILD_LIMIT children, most important first; at the top level, everything part of the flow plus up to
- *   CHILD_LIMIT of the rest (chosen once per graph, in buildGraphInfo).
+ * Finds which page a spot in a directory's layout is on: the one holding it.
+ * @param position A spot in the layout, like a box's home.
+ * @param size The directory's page size.
+ * @returns How many pages across and down it is.
  */
-function defaultShownChildren(info: GraphInfo, parentId: string): string[] {
-	if (parentId === ROOT_ID) {
-		return info.topLevelShown;
-	}
-	const children = info.childrenById.get(parentId) ?? [];
-	return children.slice(0, CHILD_LIMIT);
+function cellOf(position: Position, size: Size): PageCell {
+	return { column: Math.floor(position.x / size.width), row: Math.floor(position.y / size.height) };
 }
 
 /**
- * Lists the children of a node that get their own box; the rest wait behind a strip.
+ * Finds where a directory's current page starts in its layout.
+ * @param state The view state.
+ * @param parentId The directory.
+ * @returns The page's top-left, in the layout's coordinates; (0, 0) for a directory without pages.
+ */
+export function pageOrigin(state: LayoutState, parentId: string): Position {
+	const page = state.pages.get(parentId);
+	if (page === undefined) {
+		return { x: 0, y: 0 };
+	}
+	return { x: page.column * page.size.width, y: page.row * page.size.height };
+}
+
+/**
+ * Checks whether a child is on its directory's current page. A child without a saved page counts as on it, like a
+ * box placed by hand.
+ * @param state The view state.
+ * @param parentId The directory.
+ * @param id The child.
+ * @returns True if it's shown on the page now.
+ */
+function isOnPage(state: LayoutState, parentId: string, id: string): boolean {
+	const page = state.pages.get(parentId);
+	const cell = state.childPages.get(id);
+	if (page === undefined || cell === undefined) {
+		return true;
+	}
+	return cell.column === page.column && cell.row === page.row;
+}
+
+/**
+ * Lists the children of a node that get their own box: the placed ones on its current page.
  * @param state The view state.
  * @param info The graph lookups.
  * @param parentId The node whose children we want.
- * @returns The children within the limit, most important first, then any past it the user brought out of a strip.
+ * @returns The shown children, most important first.
  */
 export function shownChildren(state: LayoutState, info: GraphInfo, parentId: string): string[] {
-	// a copy, since the top level's list is shared by everything
-	const shown = defaultShownChildren(info, parentId).slice();
-	for (const id of childrenPastLimit(info, parentId)) {
-		if (state.shownPastLimit.has(id)) {
+	const shown: string[] = [];
+	for (const id of info.childrenById.get(parentId) ?? []) {
+		if (state.homes.has(id) && isOnPage(state, parentId, id)) {
 			shown.push(id);
 		}
 	}
 	return shown;
 }
 
-/**
- * Lists the children of a node past the limit, whether or not the user brought them out of a strip.
- * @param info The graph lookups.
- * @param parentId The node whose children we want.
- * @returns Its other children, most important first.
- */
-function childrenPastLimit(info: GraphInfo, parentId: string): string[] {
-	const shown = new Set(defaultShownChildren(info, parentId));
-	const past: string[] = [];
-	for (const id of info.childrenById.get(parentId) ?? []) {
-		if (!shown.has(id)) {
-			past.push(id);
-		}
-	}
-	return past;
-}
-
-// which side each directory's children past the limit wait on; it depends only on the graph, so it's worked out once
-// per graph and directory. A WeakMap lets an old graph's entries be forgotten along with the graph
-const pastLimitSidesCache = new WeakMap<GraphInfo, Map<string, { right: string[]; bottom: string[] }>>();
-
-/**
- * Sorts a node's children past the limit by the side the default layout would have put them on: right of the shown
- * children goes in the right strip, anything else (in a shown column) goes in the bottom strip. At the top level they
- * all wait below.
- * @param info The graph lookups.
- * @param parentId The node.
- * @returns The hidden children on each side, most important first.
- */
-function defaultPastLimitSides(info: GraphInfo, parentId: string): { right: string[]; bottom: string[] } {
-	let byParent = pastLimitSidesCache.get(info);
-	if (byParent === undefined) {
-		byParent = new Map();
-		pastLimitSidesCache.set(info, byParent);
-	}
-	const known = byParent.get(parentId);
-	if (known !== undefined) {
-		return known;
-	}
-
-	const past = childrenPastLimit(info, parentId);
-	const sides = { right: [] as string[], bottom: [] as string[] };
-	if (parentId === ROOT_ID) {
-		sides.bottom = past;
-	} else if (past.length > 0) {
-		// where every child would go if all of them had boxes
-		const all = info.childrenById.get(parentId) ?? [];
-		const sizes = new Map<string, Size>();
-		for (const id of all) {
-			sizes.set(id, defaultSize(info, id));
-		}
-		const positions = defaultLayout(all, liftEdges(parentId, info.edges, info.nodesById), sizes);
-
-		// the right edge of the shown children; anything starting past it would have been to their right
-		let shownRight = 0;
-		for (const id of defaultShownChildren(info, parentId)) {
-			shownRight = Math.max(shownRight, positions.get(id)!.x + sizes.get(id)!.width);
-		}
-		for (const id of past) {
-			if (positions.get(id)!.x >= shownRight) {
-				sides.right.push(id);
-			} else {
-				sides.bottom.push(id);
-			}
-		}
-	}
-
-	byParent.set(parentId, sides);
-	return sides;
+// the children hidden on each side of a box, behind that side's strip
+export interface HiddenSides {
+	left: string[];
+	right: string[];
+	top: string[];
+	bottom: string[];
 }
 
 /**
- * Lists the children past the limit still waiting behind each side's strip: the ones the user hasn't brought out.
- * Each stays on the side it started on, so bringing some out never moves the rest to the other strip.
+ * Sorts a node's hidden children by the side their page is on: a page in another column goes left or right, and one
+ * in the same column goes up or down.
  * @param state The view state.
  * @param info The graph lookups.
  * @param parentId The node.
  * @returns The hidden children on each side, most important first.
  */
-export function pastLimitSides(state: LayoutState, info: GraphInfo, parentId: string): { right: string[]; bottom: string[] } {
-	const sides = defaultPastLimitSides(info, parentId);
-	const waiting = { right: [] as string[], bottom: [] as string[] };
-	for (const id of sides.right) {
-		if (!state.shownPastLimit.has(id)) {
-			waiting.right.push(id);
+export function hiddenSides(state: LayoutState, info: GraphInfo, parentId: string): HiddenSides {
+	const sides: HiddenSides = { left: [], right: [], top: [], bottom: [] };
+	const page = state.pages.get(parentId);
+	if (page === undefined) {
+		return sides;
+	}
+	for (const id of info.childrenById.get(parentId) ?? []) {
+		const cell = state.childPages.get(id);
+		if (cell === undefined || isOnPage(state, parentId, id)) {
+			continue;
+		}
+		if (cell.column < page.column) {
+			sides.left.push(id);
+		} else if (cell.column > page.column) {
+			sides.right.push(id);
+		} else if (cell.row < page.row) {
+			sides.top.push(id);
+		} else {
+			sides.bottom.push(id);
 		}
 	}
-	for (const id of sides.bottom) {
-		if (!state.shownPastLimit.has(id)) {
-			waiting.bottom.push(id);
+	return sides;
+}
+
+/**
+ * Turns a directory to the next page on one side, the way clicking that side's strip does: the nearest page that way
+ * with children on it, so a turn never lands on an empty page. Only the page changes: no home moves, and no child
+ * changes page.
+ * @param state The view state.
+ * @param info The graph lookups.
+ * @param id The directory.
+ * @param side Which strip was clicked.
+ */
+export function turnPage(state: LayoutState, info: GraphInfo, id: string, side: StripSide): void {
+	const page = state.pages.get(id);
+	if (page === undefined) {
+		return;
+	}
+
+	// the hidden child on that side whose page is nearest: fewest pages away that way first, then fewest the other way
+	let nearest: PageCell | undefined = undefined;
+	let nearestAlong = Infinity;
+	let nearestAcross = Infinity;
+	for (const childId of hiddenSides(state, info, id)[side]) {
+		const cell = state.childPages.get(childId)!;
+		let along = Math.abs(cell.row - page.row);
+		let across = Math.abs(cell.column - page.column);
+		if (side === 'left' || side === 'right') {
+			along = Math.abs(cell.column - page.column);
+			across = Math.abs(cell.row - page.row);
+		}
+		if (along < nearestAlong || (along === nearestAlong && across < nearestAcross)) {
+			nearest = cell;
+			nearestAlong = along;
+			nearestAcross = across;
 		}
 	}
-	return waiting;
+	if (nearest === undefined) {
+		return;
+	}
+
+	// the box fits its page, so a page with bigger or more boxes changes its size, and its neighbors make room
+	const target = nearest;
+	function turn(): void {
+		state.pages.set(id, { column: target.column, row: target.row, size: page!.size });
+	}
+	changeSize(state, info, id, turn);
 }
 
 /**
@@ -273,12 +324,12 @@ export function closedSize(state: LayoutState, info: GraphInfo, id: string): Siz
 }
 
 /**
- * Places a node's shown children at their homes, at their current sizes. Room for boxes that grew was already made
- * when they grew (changeSize), so a home is exactly where a box is drawn.
+ * Places a node's shown children at their homes, at their current sizes, measured from its current page. Room for
+ * boxes that grew was already made when they grew (changeSize), so a home is exactly where a box is drawn.
  * @param state The view state.
  * @param info The graph lookups.
  * @param parentId The node whose children to arrange.
- * @returns Each placed child's rect, relative to the inside of the parent, in flow order.
+ * @returns Each placed child's rect, relative to the top-left of the parent's current page, in flow order.
  */
 export function arrangeChildren(state: LayoutState, info: GraphInfo, parentId: string): Map<string, Rect> {
 	const childIds: string[] = [];
@@ -287,6 +338,7 @@ export function arrangeChildren(state: LayoutState, info: GraphInfo, parentId: s
 			childIds.push(id);
 		}
 	}
+	const origin = pageOrigin(state, parentId);
 
 	// flow order, left to right then top to bottom, which is also the order to paint them
 	function compareFlow(a: string, b: string): number {
@@ -302,9 +354,29 @@ export function arrangeChildren(state: LayoutState, info: GraphInfo, parentId: s
 	for (const id of childIds.toSorted(compareFlow)) {
 		const home = state.homes.get(id)!;
 		const size = boxSize(state, info, id);
-		arranged.set(id, { x: home.x, y: home.y, width: size.width, height: size.height });
+		arranged.set(id, { x: home.x - origin.x, y: home.y - origin.y, width: size.width, height: size.height });
 	}
 	return arranged;
+}
+
+/**
+ * Places every placed child of a node at its home, on every page, at its current size. Making room for a growing box
+ * works on these, so boxes on other pages move too, and nothing ends up on top of anything when the page turns.
+ * @param state The view state.
+ * @param info The graph lookups.
+ * @param parentId The node.
+ * @returns Each placed child's rect, relative to the top-left of the parent's whole layout.
+ */
+function placedChildRects(state: LayoutState, info: GraphInfo, parentId: string): Map<string, Rect> {
+	const rects = new Map<string, Rect>();
+	for (const id of info.childrenById.get(parentId) ?? []) {
+		const home = state.homes.get(id);
+		if (home !== undefined) {
+			const size = boxSize(state, info, id);
+			rects.set(id, { x: home.x, y: home.y, width: size.width, height: size.height });
+		}
+	}
+	return rects;
 }
 
 /**
@@ -317,7 +389,7 @@ export function arrangeChildren(state: LayoutState, info: GraphInfo, parentId: s
  * @param change The change itself, like opening, closing, or resizing the box.
  */
 export function changeSize(state: LayoutState, info: GraphInfo, id: string, change: () => void): void {
-	// the box and everything around it, up to (not including) the root, which has no size
+	// the box and everything around it, up to (not including) the root, which has no siblings to move
 	const lineage = getLineage(id, info.nodesById).slice(0, -1);
 	const before = new Map<string, Size>();
 	for (const nodeId of lineage) {
@@ -349,9 +421,9 @@ function moveSiblingsForSize(state: LayoutState, info: GraphInfo, id: string, ol
 		return;
 	}
 
-	// every other placed sibling, where it's drawn
+	// every other placed sibling, at its home, on any page
 	const siblings = new Map<string, Rect>();
-	for (const [siblingId, rect] of arrangeChildren(state, info, info.nodesById.get(id)!.parent!)) {
+	for (const [siblingId, rect] of placedChildRects(state, info, info.nodesById.get(id)!.parent!)) {
 		if (siblingId !== id) {
 			siblings.set(siblingId, rect);
 		}
@@ -428,14 +500,16 @@ function squishAcross(rects: Map<string, Rect>, insideWidth: number, hasRightStr
 
 // what's drawn inside a box: where its shown children go, and which children wait behind each side's strip
 export interface Arrangement {
-	rects: Map<string, Rect>; // relative to the inside of the box
+	rects: Map<string, Rect>; // relative to where the box's page is drawn
+	hiddenLeft: string[];
 	hiddenRight: string[]; // in flow order
+	hiddenTop: string[];
 	hiddenBottom: string[];
 }
 
 /**
- * Works out what a box shows: its children as arranged, squished into the box if the user made it smaller than they
- * need, with children past CHILD_LIMIT and any the squish hid waiting behind strips.
+ * Works out what a box shows: the children on its page as arranged, squished into the box if the user made it smaller
+ * than they need, with children on other pages and any the squish hid waiting behind strips.
  * @param state The view state.
  * @param info The graph lookups.
  * @param parentId The box.
@@ -444,17 +518,17 @@ export interface Arrangement {
 export function arrangeShown(state: LayoutState, info: GraphInfo, parentId: string): Arrangement {
 	const rects = arrangeChildren(state, info, parentId);
 
-	// children past the limit never got a home; they wait on the side the default layout would have put them
-	const past = pastLimitSides(state, info, parentId);
+	// children on other pages wait on the side their page is on
+	const past = hiddenSides(state, info, parentId);
 
 	// only a size the user chose can be too small; otherwise the box fits its children
 	const set = state.openSizes.get(parentId);
-	if (parentId === ROOT_ID || set === undefined || !state.expanded.has(parentId)) {
-		return { rects: rects, hiddenRight: past.right, hiddenBottom: past.bottom };
+	if (set === undefined || !state.expanded.has(parentId)) {
+		return { rects: rects, hiddenLeft: past.left, hiddenRight: past.right, hiddenTop: past.top, hiddenBottom: past.bottom };
 	}
 
 	// the inside: within the padding on every side and below the title, measured from where children start
-	const origin = childOrigin();
+	const origin = childOrigin(state, info, parentId);
 	const insideWidth = set.width - origin.x - PADDING;
 	const insideHeight = set.height - origin.y - PADDING;
 
@@ -468,36 +542,45 @@ export function arrangeShown(state: LayoutState, info: GraphInfo, parentId: stri
 
 	return {
 		rects: down.rects,
+		hiddenLeft: past.left,
 		hiddenRight: across.hidden.concat(past.right),
+		hiddenTop: past.top,
 		hiddenBottom: down.hidden.concat(past.bottom),
 	};
 }
 
 /**
- * Finds how much room a box keeps for strips of children past the limit, on each side.
+ * Finds how much room a box keeps for strips of children on other pages, on each side.
+ * @param state The view state.
  * @param info The graph lookups.
  * @param id The box.
- * @returns STRIP_ROOM on each side that has some, otherwise nothing. The top level keeps its own strip below the boxes
- *   instead, outside any box.
+ * @returns STRIP_ROOM on each side that has some, otherwise nothing.
  */
-function pastLimitRoom(state: LayoutState, info: GraphInfo, id: string): { right: number; bottom: number } {
-	if (id === ROOT_ID) {
-		return { right: 0, bottom: 0 };
+function stripRoom(state: LayoutState, info: GraphInfo, id: string): { left: number; right: number; top: number; bottom: number } {
+	const past = hiddenSides(state, info, id);
+	function roomFor(hidden: string[]): number {
+		return hidden.length > 0 ? STRIP_ROOM : 0;
 	}
-	const past = pastLimitSides(state, info, id);
-	return { right: past.right.length > 0 ? STRIP_ROOM : 0, bottom: past.bottom.length > 0 ? STRIP_ROOM : 0 };
+	return { left: roomFor(past.left), right: roomFor(past.right), top: roomFor(past.top), bottom: roomFor(past.bottom) };
 }
 
 /**
- * Works out how big an open box must be to hold its children.
+ * Works out how big an open box must be to hold its page: the page's size, so turning pages never resizes the box,
+ * or more if a child on it sticks out past the page's edge.
  * @param state The view state.
  * @param info The graph lookups.
  * @param id The open box.
- * @returns The size reaching its furthest child, plus padding and room for its name.
+ * @returns The size reaching its page's far edges or its furthest child, plus padding and room for its name.
  */
 export function fitSize(state: LayoutState, info: GraphInfo, id: string): Size {
 	let right = 0;
 	let bottom = 0;
+	const page = state.pages.get(id);
+	if (page !== undefined) {
+		// a page includes the gap after its last boxes, which the box doesn't need to show
+		right = page.size.width - GAP;
+		bottom = page.size.height - GAP;
+	}
 
 	// arranged rects use current sizes and include pushes: opening a child grows its parent
 	for (const rect of arrangeChildren(state, info, id).values()) {
@@ -505,9 +588,9 @@ export function fitSize(state: LayoutState, info: GraphInfo, id: string): Size {
 		bottom = Math.max(bottom, rect.y + rect.height);
 	}
 
-	// plus room for strips of children past the limit, so their padding is even too
-	const origin = childOrigin();
-	const room = pastLimitRoom(state, info, id);
+	// plus room for strips of children on other pages, so their padding is even too
+	const origin = childOrigin(state, info, id);
+	const room = stripRoom(state, info, id);
 	return { width: origin.x + right + PADDING + room.right, height: origin.y + bottom + PADDING + room.bottom };
 }
 
@@ -526,26 +609,59 @@ export function boxSize(state: LayoutState, info: GraphInfo, id: string): Size {
 }
 
 /**
- * Gives a node's shown children their homes from the default layout, the first time it opens.
- * @param state The view state. Gets the new homes.
+ * Gives a node's children their homes from the default layout, the first time it opens: every child, shown or not, so
+ * each has its own home on some page. At the top level, the ones in the flow are laid out first and the rest (configs,
+ * docs) below them, so the flow fills the first page. The node then gets its pages, and each child the page it's on.
+ * @param state The view state. Gets the new homes, and pages.
  * @param info The graph lookups.
  * @param parentId The node being opened.
  */
 export function layOutChildren(state: LayoutState, info: GraphInfo, parentId: string): void {
 	// placed before: keep what's there, so reopening never rearranges anything; only children without a home are laid
-	// out, like new files, or top-level files that used to be hidden
+	// out, like new files
 	const placed: string[] = [];
 	const unplaced: string[] = [];
-	for (const id of shownChildren(state, info, parentId)) {
+	for (const id of info.childrenById.get(parentId) ?? []) {
 		if (state.homes.has(id)) {
 			placed.push(id);
 		} else {
 			unplaced.push(id);
 		}
 	}
-	if (unplaced.length === 0) {
-		return;
+
+	// at the top level, the flow first, then the rest below everything placed so far
+	let firstBatch = unplaced;
+	let secondBatch: string[] = [];
+	if (parentId === ROOT_ID) {
+		const inFlow = topLevelInFlow(info.edges, info.nodesById);
+		firstBatch = [];
+		for (const id of unplaced) {
+			if (inFlow.has(id)) {
+				firstBatch.push(id);
+			} else {
+				secondBatch.push(id);
+			}
+		}
 	}
+	if (firstBatch.length > 0) {
+		placeUnplaced(state, info, parentId, placed, firstBatch);
+	}
+	if (secondBatch.length > 0) {
+		placeUnplaced(state, info, parentId, placed.concat(firstBatch), secondBatch);
+	}
+
+	givePages(state, info, parentId, unplaced);
+}
+
+/**
+ * Lays out children that have no home yet, with the default layout among themselves, below any placed ones.
+ * @param state The view state. Gets the new homes.
+ * @param info The graph lookups.
+ * @param parentId Their parent.
+ * @param placed The siblings that already have homes.
+ * @param unplaced The children to lay out.
+ */
+function placeUnplaced(state: LayoutState, info: GraphInfo, parentId: string, placed: string[], unplaced: string[]): void {
 
 	// only edges between the children being laid out, so nothing else can push them rightward
 	const laidOut = new Set(unplaced);
@@ -583,6 +699,82 @@ export function layOutChildren(state: LayoutState, info: GraphInfo, parentId: st
 }
 
 /**
+ * Gives a directory its pages the first time it opens, and its children the page each is on. The first page is sized
+ * to hold its CHILD_LIMIT most important children from the top-left; for the root, everything in the flow plus up to
+ * CHILD_LIMIT of the rest. A directory that already has pages keeps them, and only children new to it get a page, so
+ * nothing moves to another page on its own.
+ * @param state The view state. Gets the pages.
+ * @param info The graph lookups.
+ * @param parentId The directory.
+ * @param newIds Children just given homes, which need a page.
+ */
+function givePages(state: LayoutState, info: GraphInfo, parentId: string, newIds: string[]): void {
+	let page = state.pages.get(parentId);
+	let needPages = newIds;
+	if (page === undefined) {
+		// top-level boxes could once go above or left of everything; a page can't, so they all move over by the same
+		// amount to start at the corner, keeping their places relative to each other
+		if (parentId === ROOT_ID) {
+			moveIntoCorner(state, info);
+		}
+		let firstPage = (info.childrenById.get(parentId) ?? []).slice(0, CHILD_LIMIT);
+		if (parentId === ROOT_ID) {
+			firstPage = info.topLevelShown;
+		}
+
+		// from the top-left out to the far edges of its most important children, plus the gap after them, so the next
+		// page starts right where its first box does; never 0, so pages can be counted
+		let width = 1;
+		let height = 1;
+		for (const id of firstPage) {
+			const home = state.homes.get(id)!;
+			const size = boxSize(state, info, id);
+			width = Math.max(width, home.x + size.width + GAP);
+			height = Math.max(height, home.y + size.height + GAP);
+		}
+		page = { column: 0, row: 0, size: { width: width, height: height } };
+		state.pages.set(parentId, page);
+
+		// new pages, so every child is placed on one
+		needPages = info.childrenById.get(parentId) ?? [];
+	}
+
+	for (const id of needPages) {
+		const home = state.homes.get(id);
+		if (home !== undefined) {
+			state.childPages.set(id, cellOf(home, page.size));
+		}
+	}
+}
+
+/**
+ * Moves every top-level box over by the same amount, so none is above or left of the root's top-left corner. Their
+ * places relative to each other don't change.
+ * @param state The view state. Top-level homes may move.
+ * @param info The graph lookups.
+ */
+function moveIntoCorner(state: LayoutState, info: GraphInfo): void {
+	let left = 0;
+	let top = 0;
+	for (const id of info.childrenById.get(ROOT_ID) ?? []) {
+		const home = state.homes.get(id);
+		if (home !== undefined) {
+			left = Math.min(left, home.x);
+			top = Math.min(top, home.y);
+		}
+	}
+	if (left === 0 && top === 0) {
+		return;
+	}
+	for (const id of info.childrenById.get(ROOT_ID) ?? []) {
+		const home = state.homes.get(id);
+		if (home !== undefined) {
+			state.homes.set(id, { x: home.x - left, y: home.y - top });
+		}
+	}
+}
+
+/**
  * Puts a box and everything inside it back to how it first looked: the default layout and sizes, with every box
  * inside it closed. The box itself stays open or closed. Resetting the root resets the whole graph.
  * @param state The view state.
@@ -602,9 +794,13 @@ export function resetNode(state: LayoutState, info: GraphInfo, id: string): void
 				state.closedSizes.delete(nodeId);
 				state.openSizes.delete(nodeId);
 				state.expanded.delete(nodeId);
-				state.shownPastLimit.delete(nodeId);
+				state.pages.delete(nodeId);
+				state.childPages.delete(nodeId);
 			}
 		}
+
+		// its pages start over from the default layout too
+		state.pages.delete(id);
 
 		// if the box is open, its children have no homes now, so they get the default layout again
 		if (state.expanded.has(id)) {
@@ -620,20 +816,18 @@ export function resetNode(state: LayoutState, info: GraphInfo, id: string): void
 }
 
 /**
- * Moves a box to a new home within its parent.
+ * Moves a box to a new home within its parent. It stays on the page it's on, wherever it goes.
  * @param state The view state.
  * @param info The graph lookups.
  * @param id The box.
- * @param home Where it should go, relative to the inside of its parent. Past the parent's right or bottom edge is
- *   fine, since the parent grows to fit; past its left or top edge stops at the edge, since those never move.
- *   The root is the whole page and has no edges, so its children can go anywhere.
+ * @param position Where it should be drawn, relative to the top-left of its parent's current page. Past the parent's
+ *   right or bottom edge is fine, since the parent grows to fit; past its left or top edge stops at the edge, since
+ *   those never move.
  */
-export function moveTo(state: LayoutState, info: GraphInfo, id: string, home: Position): void {
-	if (info.nodesById.get(id)!.parent === ROOT_ID) {
-		state.homes.set(id, home);
-		return;
-	}
-	state.homes.set(id, { x: Math.max(0, home.x), y: Math.max(0, home.y) });
+export function moveTo(state: LayoutState, info: GraphInfo, id: string, position: Position): void {
+	const parentId = info.nodesById.get(id)!.parent!;
+	const origin = pageOrigin(state, parentId);
+	state.homes.set(id, { x: origin.x + Math.max(0, position.x), y: origin.y + Math.max(0, position.y) });
 }
 
 /**
@@ -645,8 +839,6 @@ export function moveTo(state: LayoutState, info: GraphInfo, id: string, home: Po
  * @param id The box that was dropped.
  */
 export function growToFit(state: LayoutState, info: GraphInfo, id: string): void {
-	const origin = childOrigin();
-
 	// from the box's directory up: a directory growing can stick out of its own directory in turn
 	let child = id;
 	for (const ancestorId of getLineage(id, info.nodesById).slice(1)) {
@@ -654,7 +846,8 @@ export function growToFit(state: LayoutState, info: GraphInfo, id: string): void
 		const rect = arrangeChildren(state, info, ancestorId).get(child);
 		if (set !== undefined && rect !== undefined) {
 			// what this one box needs: up to its far edges, plus the padding (and the title, going down)
-			const room = pastLimitRoom(state, info, ancestorId);
+			const origin = childOrigin(state, info, ancestorId);
+			const room = stripRoom(state, info, ancestorId);
 			state.openSizes.set(ancestorId, {
 				width: Math.max(set.width, origin.x + rect.x + rect.width + PADDING + room.right),
 				height: Math.max(set.height, origin.y + rect.y + rect.height + PADDING + room.bottom),
@@ -697,8 +890,8 @@ function setSize(state: LayoutState, info: GraphInfo, id: string, size: Size): v
 	let minHeight = MIN_BOX_HEIGHT;
 	if (isOpen) {
 		const children = arrangeChildren(state, info, id);
-		const origin = childOrigin();
-		const room = pastLimitRoom(state, info, id);
+		const origin = childOrigin(state, info, id);
+		const room = stripRoom(state, info, id);
 
 		// at the smallest size, a row or column longer than 3 hides boxes, which brings a strip that needs its room
 		const smallestWidth = minSquishWidth(children);
@@ -758,96 +951,4 @@ export function closeNode(state: LayoutState, info: GraphInfo, id: string): void
 		state.expanded.delete(id);
 	}
 	changeSize(state, info, id, close);
-}
-
-/**
- * Gives children brought out of a strip their homes: stacked in one column, below every placed box for the bottom
- * strip or right of them for the right strip, so they come out where they waited. A column of their own keeps them from
- * straddling the columns already there, which would make squishing count them as one and stop it hiding any.
- * @param state The view state. The children get homes.
- * @param info The graph lookups.
- * @param parentId The box they're in.
- * @param ids The children, most important first; any that already have a home keep it.
- * @param side The strip they came out of.
- */
-function placeBroughtOut(state: LayoutState, info: GraphInfo, parentId: string, ids: string[], side: 'right' | 'bottom'): void {
-	// the edges of everything already placed; with nothing placed, they start at the corner
-	let left = Infinity;
-	let top = Infinity;
-	let right = 0;
-	let bottom = 0;
-	for (const rect of arrangeChildren(state, info, parentId).values()) {
-		left = Math.min(left, rect.x);
-		top = Math.min(top, rect.y);
-		right = Math.max(right, rect.x + rect.width);
-		bottom = Math.max(bottom, rect.y + rect.height);
-	}
-	if (left === Infinity) {
-		left = 0;
-		top = 0;
-	}
-
-	let x = left;
-	let y = bottom + GAP;
-	if (side === 'right') {
-		x = right + GAP;
-		y = top;
-	}
-	for (const id of ids) {
-		if (state.homes.has(id)) {
-			continue;
-		}
-		state.homes.set(id, { x: x, y: y });
-		y += boxSize(state, info, id).height + GAP;
-	}
-}
-
-/**
- * Shows more of what a strip hides, the way clicking it does. If the user made the box too small for the children it
- * already shows on that side, it first grows back to fit them; otherwise the next CHILD_LIMIT children waiting on that
- * side get boxes, in a column on that side of the ones already there.
- * @param state The view state.
- * @param info The graph lookups.
- * @param id The box the strip belongs to, or the root for the strip below the top-level boxes.
- * @param side Which of the box's strips was clicked.
- */
-export function showMoreFromStrip(state: LayoutState, info: GraphInfo, id: string, side: 'right' | 'bottom'): void {
-	function showMore(): void {
-		// a strip holds the boxes a squish hid as well as the ones past the limit
-		const shown = arrangeShown(state, info, id);
-		const past = pastLimitSides(state, info, id);
-		let squishedHidden: number;
-		let waiting: string[];
-		if (side === 'right') {
-			squishedHidden = shown.hiddenRight.length - past.right.length;
-			waiting = past.right;
-		} else {
-			squishedHidden = shown.hiddenBottom.length - past.bottom.length;
-			waiting = past.bottom;
-		}
-
-		// the size the user chose is too small for what's already shown, so the box goes back to fitting it
-		if (squishedHidden > 0) {
-			state.openSizes.delete(id);
-			return;
-		}
-
-		const brought = waiting.slice(0, CHILD_LIMIT);
-		for (const childId of brought) {
-			state.shownPastLimit.add(childId);
-		}
-		placeBroughtOut(state, info, id, brought, side);
-
-		// they go below the boxes already there, which may be past the edge of a size the user chose
-		for (const childId of brought) {
-			growToFit(state, info, childId);
-		}
-	}
-
-	// the root is the whole page, so nothing around it needs room
-	if (id === ROOT_ID) {
-		showMore();
-	} else {
-		changeSize(state, info, id, showMore);
-	}
 }

@@ -7,7 +7,7 @@ Each rule should become a test.
 
 ## Terms
 
-- **Box**: a file or a directory on screen.
+- **Box**: a file or a directory on screen. The repo itself is a box too, the root, around everything.
 - **Home**: where a box sits when nothing is squishing it. Set by the default layout or by dragging. It changes only when the user drags or resets the box, or a neighbor grows into it; squishing and turning pages never change it.
 - **Chain**: boxes lined up in a row or column, so pushing one pushes the next.
 - **Strip**: a `+N` button on a directory's edge, standing in for the boxes hidden on that side.
@@ -23,8 +23,7 @@ Each rule should become a test.
 - Columns are centered vertically.
 - Padding between boxes is even by default, whatever their sizes.
 - A directory opens on its first page: the top-left of its layout, at full spacing, sized to show about 5 children. The rest wait behind strips on the sides their homes are on.
-- At the top level, every node with an arrow in or out gets a box, plus up to 5 of the rest. The others wait in a strip below the top-level boxes.
-- The top level isn't paged; it has no box to page.
+- The root's first page holds every top-level node with an arrow in or out, plus up to 5 of the rest. Its layout puts the ones in the flow first, so the others (configs, docs) come after them, on later pages.
 - A directory never hides just one child.
 
 ## Size
@@ -45,7 +44,7 @@ Each rule should become a test.
 - A dropped box lands exactly where it was let go, and nothing it didn't land on moves, even when the dropped box had grown and others were shifted to make room for it.
 - On drop, anything underneath moves away from where the dropped box landed (comparing centers), in any direction, and anything it hits moves the same way. The dropped box stays put.
 - A push never moves a box past a directory's left or top edge. If it would, the push goes right or down instead, whichever is shorter.
-- The top level has no border, so boxes there can be dragged and pushed anywhere, in any direction.
+- The root can't be dragged or closed: there's nothing to move it within or close it into. It can be resized and reset like any directory, and its edges hold top-level boxes in like any directory's.
 - A drop must never hide a box. The directory grows instead.
 
 ## Resizing
@@ -66,6 +65,8 @@ Each rule should become a test.
 - A strip shows on any side with hidden children (left, right, top, or bottom), counting the ones behind it.
 - Clicking a strip turns the page that way: the window moves by one page, so what was shown goes behind a strip on the opposite side. The directory keeps its size, and no home changes.
 - A page turn moves by the page's unsquished size, so a squished directory pages through the same children, drawn tighter.
+- A child stays on the page it's on until the directory is resized or reset; pushing and dragging never move it to another page. A child pushed or dropped past the page's edge stays on the page, and the directory grows to hold it.
+- Turning a page goes to the nearest page that way with children on it, so it never lands on an empty page.
 - When a directory's layout is taller or wider than one page, its title shows where it is, dimmed: `↓ 2/3` for down, `→ 1/2` for across, both if both. A directory that fits on one page shows nothing.
 - Resizing keeps the window's top-left where it was and recounts the pages.
 - Showing a specific node (from the sidebar, or later a flow step) turns each directory holding it to the page it's on. It's in view, but not necessarily centered.
@@ -95,6 +96,7 @@ Each rule should become a test.
 
 ## Painting
 
+- The root is drawn as a transparent box with a faint dashed border, titled with the repo's name, so it doesn't compete with the boxes inside it.
 - A directory and everything inside it paint as one unit.
 - Order follows the layout, left to right, except a box being dragged.
 - The toolbar holds only icons: reset, fit, arrows, settings. Arrows and settings each open a popup; one is open at a time, and clicking outside or pressing Escape closes it.

@@ -1,6 +1,6 @@
 import { Camera } from './camera';
 import { Position, Size } from './geometry';
-import { createLayoutState, GraphInfo, LayoutState } from './state';
+import { createLayoutState, GraphInfo, LayoutState, Page, PageCell } from './state';
 
 // how strongly arrows draw, from the toolbar: only the selected box's, the rest faint, or everything in full
 export type ArrowMode = 'hidden' | 'default' | 'full';
@@ -8,8 +8,9 @@ export type ArrowMode = 'hidden' | 'default' | 'full';
 // the layout state and camera in plain arrays, since messages and VS Code's storage only carry JSON-like data
 export interface SavedLayout {
 	expanded: string[];
-	shownPastLimit?: string[]; // missing from layouts saved before strips could be clicked
 	homes: [string, Position][];
+	pages?: [string, Page][]; // missing from layouts saved before directories had pages
+	childPages?: [string, PageCell][]; // the same
 	closedSizes: [string, Size][];
 	openSizes: [string, Size][];
 	camera: Camera;
@@ -28,8 +29,9 @@ export interface SavedLayout {
 export function toSaved(state: LayoutState, camera: Camera, arrowMode: ArrowMode, arrowDepth: number): SavedLayout {
 	return {
 		expanded: Array.from(state.expanded),
-		shownPastLimit: Array.from(state.shownPastLimit),
 		homes: Array.from(state.homes.entries()),
+		pages: Array.from(state.pages.entries()),
+		childPages: Array.from(state.childPages.entries()),
 		closedSizes: Array.from(state.closedSizes.entries()),
 		openSizes: Array.from(state.openSizes.entries()),
 		camera: camera,
@@ -55,14 +57,19 @@ export function fromSaved(saved: SavedLayout, info: GraphInfo): { state: LayoutS
 			state.expanded.add(id);
 		}
 	}
-	for (const id of saved.shownPastLimit ?? []) {
-		if (info.nodesById.has(id)) {
-			state.shownPastLimit.add(id);
-		}
-	}
 	for (const [id, home] of saved.homes) {
 		if (info.nodesById.has(id)) {
 			state.homes.set(id, home);
+		}
+	}
+	for (const [id, page] of saved.pages ?? []) {
+		if (info.nodesById.has(id)) {
+			state.pages.set(id, page);
+		}
+	}
+	for (const [id, cell] of saved.childPages ?? []) {
+		if (info.nodesById.has(id)) {
+			state.childPages.set(id, cell);
 		}
 	}
 	for (const [id, size] of saved.closedSizes) {

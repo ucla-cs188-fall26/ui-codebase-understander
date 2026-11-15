@@ -5,7 +5,7 @@ import { getLineage, groupByParent } from '../analysis/lookups';
 import { Arrow, arrowHead, arrowPath, arrowWidth, placeArrows } from '../layout/arrows';
 import { Camera, fitCamera, zoomAt } from '../layout/camera';
 import { boundsOf, Position, Rect, Size } from '../layout/geometry';
-import { arrangeShown, boxSize, buildGraphInfo, closeNode, copyLayoutState, createLayoutState, GraphInfo, layOutChildren, LayoutState, openNode, resetNode, resizeTo, showMoreFromStrip } from '../layout/state';
+import { arrangeShown, boxSize, buildGraphInfo, closeNode, copyLayoutState, createLayoutState, GraphInfo, layOutChildren, LayoutState, openNode, resetNode, resizeTo, StripSide, turnPage } from '../layout/state';
 import { ArrowMode, fromSaved, toSaved } from '../layout/saved';
 import { dragTo, dropAt } from '../layout/drop';
 import { makeArrowsIcon, makeCloseIcon, makeFitIcon, makeGripIcon, makeOpenIcon, makeResetIcon, makeResizeIcon, makeSettingsIcon, SVG_NS } from './icons';
@@ -348,19 +348,21 @@ function drawGraph(): void {
 			box.classList.add('selected');
 		}
 
-		// anything that can hold children gets an arrow to open or close it
-		if (node.kind !== 'file') {
+		// anything that can hold children gets an arrow to open or close it, except the root, which is always open
+		if (node.kind !== 'file' && id !== ROOT_ID) {
 			const chevron = document.createElement('span');
 			chevron.className = 'chevron';
 			chevron.textContent = isOpen ? '▾' : '▸';
 			box.querySelector('.box-title')!.prepend(chevron);
 		}
 
-		// a grip at the title's right end, so it's clear the title is where to grab the box
-		const grip = document.createElement('span');
-		grip.className = 'grip';
-		grip.appendChild(makeGripIcon());
-		box.querySelector('.box-title')!.appendChild(grip);
+		// a grip at the title's right end, so it's clear the title is where to grab the box; the root can't be dragged
+		if (id !== ROOT_ID) {
+			const grip = document.createElement('span');
+			grip.className = 'grip';
+			grip.appendChild(makeGripIcon());
+			box.querySelector('.box-title')!.appendChild(grip);
+		}
 
 		// only the selected box can be resized, the same as moving
 		if (id === selectedId) {
@@ -1377,7 +1379,9 @@ const CLICK_SLOP = 4;
  */
 function isOnGrabArea(target: Element): boolean {
 	const box = target.closest<HTMLElement>('.box');
-	if (box === null || box.dataset.id !== selectedId) {
+
+	// the root is around everything, so there's nothing to drag it within
+	if (box === null || box.dataset.id !== selectedId || selectedId === ROOT_ID) {
 		return false;
 	}
 	return !box.classList.contains('open') || target.closest('.box-title') !== null;
@@ -1564,11 +1568,9 @@ function moveDraggedBox(event: PointerEvent): void {
 	let offsetX = dx / camera.scale;
 	let offsetY = dy / camera.scale;
 
-	// inside a directory, it can't go past the left or top edge, the same limit moveTo keeps on drop
-	if (info.nodesById.get(drag.id)!.parent !== ROOT_ID) {
-		offsetX = Math.max(offsetX, -drag.startDrawn.x);
-		offsetY = Math.max(offsetY, -drag.startDrawn.y);
-	}
+	// it can't go past its directory's left or top edge, the same limit moveTo keeps on drop
+	offsetX = Math.max(offsetX, -drag.startDrawn.x);
+	offsetY = Math.max(offsetY, -drag.startDrawn.y);
 
 	// the home moves and the directory grows to hold it, starting over from before the drag each time, so a long
 	// drag can't build up drift; nothing is pushed until the drop
@@ -1610,13 +1612,18 @@ function handleClick(event: MouseEvent): void {
 	if (strip !== null && info !== undefined) {
 		selectedEdge = undefined;
 		const ownerId = strip.dataset.ownerId!;
-		const side = strip.dataset.side as 'right' | 'bottom';
-		showMoreFromStrip(state, info, ownerId, side);
+		const side = strip.dataset.side as StripSide;
+		turnPage(state, info, ownerId, side);
 		drawGraph();
 		return;
 	}
 	const box = target.closest<HTMLElement>('.box');
-	const id = box?.dataset.id;
+	let id = box?.dataset.id;
+
+	// the root's empty inside is the canvas, so a click there clears the selection; its title selects it
+	if (id === ROOT_ID && target.closest('.box-title') === null) {
+		id = undefined;
+	}
 
 	// empty space, or the "+N more" box, which has no node
 	if (id === undefined) {

@@ -556,7 +556,7 @@ function buildHtml(scriptUri: vscode.Uri): string {
 		}
 		/* the box under the mouse, so it's clear which one a click would act on; the selected box keeps its own
 		   border, and nothing lights up while dragging, panning, or resizing */
-		body:not(.dragging):not(.panning):not(.resizing) .box:hover:not(.selected) {
+		body:not(.dragging):not(.panning):not(.resizing) .box:hover:not(.selected):not(.repo) {
 			border-color: var(--vscode-descriptionForeground);
 		}
 		.chevron {
@@ -576,6 +576,14 @@ function buildHtml(scriptUri: vscode.Uri): string {
 		}
 		.box.open {
 			background: var(--vscode-editor-background);
+		}
+		/* the root, around everything: see-through, with a faint dashed border, so it doesn't compete with what's inside */
+		.box.repo {
+			background: transparent;
+			border-style: dashed;
+		}
+		.box.repo > .box-title {
+			border-bottom: none;
 		}
 		/* a "+N" bar in a box's padding, standing in for the children hidden on that side */
 		.strip {
@@ -597,6 +605,7 @@ function buildHtml(scriptUri: vscode.Uri): string {
 			background: var(--vscode-toolbar-hoverBackground);
 		}
 		/* a right strip is tall and thin, so its count reads top to bottom */
+		.strip-left,
 		.strip-right {
 			writing-mode: vertical-rl;
 		}

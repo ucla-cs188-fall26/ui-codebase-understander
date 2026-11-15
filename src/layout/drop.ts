@@ -1,4 +1,3 @@
-import { ROOT_ID } from '../graph/types';
 import { GAP } from './defaultLayout';
 import { overlapsWithGap, Position, Rect } from './geometry';
 import { arrangeChildren, changeSize, GraphInfo, growToFit, LayoutState, moveTo } from './state';
@@ -112,7 +111,7 @@ function anyPastEdge(rects: Map<string, Rect>): boolean {
 /**
  * Makes room for a dropped box: what it landed on moves away from it, and what those hit moves too. The dropped box
  * stays put. Inside a directory nothing goes past the left or top edge; if it would, everything is pushed right or
- * down instead. At the top level there are no edges.
+ * down instead.
  * @param state The view state. Pushed boxes get new homes.
  * @param info The graph lookups.
  * @param droppedId The box that was just dropped.
@@ -124,7 +123,7 @@ export function settleDrop(state: LayoutState, info: GraphInfo, droppedId: strin
 	const before = arrangeChildren(state, info, parentId);
 
 	let after = runChain(before, droppedId, false);
-	if (parentId !== ROOT_ID && anyPastEdge(after)) {
+	if (anyPastEdge(after)) {
 		after = runChain(before, droppedId, true);
 	}
 
