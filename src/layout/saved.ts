@@ -65,13 +65,17 @@ export function fromSaved(saved: SavedLayout, info: GraphInfo): { state: LayoutS
 	for (const [id, page] of saved.pages ?? []) {
 		if (info.nodesById.has(id)) {
 			// pages saved before resizing could change them have no anchor or natural size: they were cut from the
-			// layout's top-left, at the size they are
+			// layout's top-left, at the size they are; ones saved before pages were drawn from their boxes are drawn from
+			// their grid corner, until they're next turned to
+			const anchor = page.anchor ?? { x: 0, y: 0 };
+			const gridCorner = { x: anchor.x + page.column * page.size.width, y: anchor.y + page.row * page.size.height };
 			state.pages.set(id, {
 				column: page.column,
 				row: page.row,
-				anchor: page.anchor ?? { x: 0, y: 0 },
+				anchor: anchor,
 				size: page.size,
 				natural: page.natural ?? page.size,
+				drawnFrom: page.drawnFrom ?? gridCorner,
 			});
 		}
 	}

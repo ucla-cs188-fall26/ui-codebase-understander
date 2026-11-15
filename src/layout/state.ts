@@ -32,6 +32,7 @@ export interface Page {
 	anchor: Position;
 	size: Size; // the page as it is now; smaller than natural while the box is too small to squish its page into
 	natural: Size; // the page at full spacing: what it opened at, or bigger once the user made the box bigger
+	drawnFrom: Position; // where the page is drawn from: the top-left of its boxes, set when it's turned to or resized
 }
 
 // the four sides of a box, where its strips can be
@@ -177,17 +178,47 @@ function cellOf(position: Position, anchor: Position, size: Size): PageCell {
 }
 
 /**
- * Finds where a directory's current page starts in its layout.
+ * Finds where a directory's current page is drawn from in its layout: the top-left of the boxes on it, as it was when
+ * the page was turned to or resized. Boxes on other pages can be pushed while a box grows, so a page's grid corner
+ * can sit above or left of its first box; drawing from the boxes leaves no empty space before them. It stays put while
+ * the page is showing, so moving a box on it never shifts the rest.
  * @param state The view state.
  * @param parentId The directory.
- * @returns The page's top-left, in the layout's coordinates; (0, 0) for a directory without pages.
+ * @returns The page's drawn top-left, in the layout's coordinates; (0, 0) for a directory without pages.
  */
 export function pageOrigin(state: LayoutState, parentId: string): Position {
 	const page = state.pages.get(parentId);
 	if (page === undefined) {
 		return { x: 0, y: 0 };
 	}
-	return { x: page.anchor.x + page.column * page.size.width, y: page.anchor.y + page.row * page.size.height };
+	return page.drawnFrom;
+}
+
+/**
+ * Finds the top-left of the boxes on one of a directory's pages, to draw the page from.
+ * @param state The view state.
+ * @param info The graph lookups.
+ * @param parentId The directory.
+ * @param cell The page.
+ * @param anchor Where its pages are cut from.
+ * @param size Its page size.
+ * @returns The furthest left and furthest up any box on the page starts; the page's grid corner if it has none.
+ */
+function topLeftOfPage(state: LayoutState, info: GraphInfo, parentId: string, cell: PageCell, anchor: Position, size: Size): Position {
+	let left = Infinity;
+	let top = Infinity;
+	for (const id of info.childrenById.get(parentId) ?? []) {
+		const home = state.homes.get(id);
+		const childCell = state.childPages.get(id);
+		if (home !== undefined && childCell !== undefined && childCell.column === cell.column && childCell.row === cell.row) {
+			left = Math.min(left, home.x);
+			top = Math.min(top, home.y);
+		}
+	}
+	if (left === Infinity) {
+		return { x: anchor.x + cell.column * size.width, y: anchor.y + cell.row * size.height };
+	}
+	return { x: left, y: top };
 }
 
 /**
@@ -355,7 +386,8 @@ export function turnPage(state: LayoutState, info: GraphInfo, id: string, side: 
 	// the box fits its page, so a page with bigger or more boxes changes its size, and its neighbors make room
 	const target = nearest;
 	function turn(): void {
-		state.pages.set(id, { column: target.column, row: target.row, anchor: page!.anchor, size: page!.size, natural: page!.natural });
+		const drawnFrom = topLeftOfPage(state, info, id, target, page!.anchor, page!.size);
+		state.pages.set(id, { column: target.column, row: target.row, anchor: page!.anchor, size: page!.size, natural: page!.natural, drawnFrom: drawnFrom });
 	}
 	changeSize(state, info, id, turn);
 }
@@ -770,6 +802,7 @@ function placeUnplaced(state: LayoutState, info: GraphInfo, parentId: string, pl
 function givePages(state: LayoutState, info: GraphInfo, parentId: string, newIds: string[]): void {
 	let page = state.pages.get(parentId);
 	let needPages = newIds;
+	const isNewPage = page === undefined;
 	if (page === undefined) {
 		// top-level boxes could once go above or left of everything; a page can't, so they all move over by the same
 		// amount to start at the corner, keeping their places relative to each other
@@ -792,7 +825,7 @@ function givePages(state: LayoutState, info: GraphInfo, parentId: string, newIds
 			height = Math.max(height, home.y + size.height + GAP);
 		}
 		const size = { width: width, height: height };
-		page = { column: 0, row: 0, anchor: { x: 0, y: 0 }, size: size, natural: size };
+		page = { column: 0, row: 0, anchor: { x: 0, y: 0 }, size: size, natural: size, drawnFrom: { x: 0, y: 0 } };
 		state.pages.set(parentId, page);
 
 		// new pages, so every child is placed on one
@@ -804,6 +837,12 @@ function givePages(state: LayoutState, info: GraphInfo, parentId: string, newIds
 		if (home !== undefined) {
 			state.childPages.set(id, cellOf(home, page.anchor, page.size));
 		}
+	}
+
+	// a new page is drawn from its first boxes
+	if (isNewPage) {
+		const first = { column: 0, row: 0 };
+		page.drawnFrom = topLeftOfPage(state, info, parentId, first, page.anchor, page.size);
 	}
 }
 
@@ -1017,7 +1056,8 @@ function fitPageToSize(state: LayoutState, info: GraphInfo, id: string): void {
 		}
 
 		const size = { width: width, height: height };
-		state.pages.set(id, { column: 0, row: 0, anchor: anchor, size: size, natural: natural });
+		// it keeps being drawn from where it was, so the same part of the layout stays in view
+		state.pages.set(id, { column: 0, row: 0, anchor: anchor, size: size, natural: natural, drawnFrom: anchor });
 		let changed = false;
 		for (const childId of info.childrenById.get(id) ?? []) {
 			const home = state.homes.get(childId);
@@ -1169,7 +1209,8 @@ export function turnToPage(state: LayoutState, info: GraphInfo, id: string, cell
 		return;
 	}
 	function turn(): void {
-		state.pages.set(id, { column: cell.column, row: cell.row, anchor: page!.anchor, size: page!.size, natural: page!.natural });
+		const drawnFrom = topLeftOfPage(state, info, id, cell, page!.anchor, page!.size);
+		state.pages.set(id, { column: cell.column, row: cell.row, anchor: page!.anchor, size: page!.size, natural: page!.natural, drawnFrom: drawnFrom });
 	}
 	changeSize(state, info, id, turn);
 }

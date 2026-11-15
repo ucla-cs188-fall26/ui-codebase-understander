@@ -1072,6 +1072,20 @@ suite('pages', () => {
 		assert.strictEqual(top, 0);
 	});
 
+	test('draws a page from its first box, even after a box on an earlier page grew and pushed it down', () => {
+		const { info, state } = makeFolder(10);
+
+		// the first file grows tall, which pushes every file below it down, the second page's too
+		resizeTo(state, info, 'p/f11.ts', { width: boxSize(state, info, 'p/f11.ts').width, height: 400 });
+		turnPage(state, info, 'p', 'bottom');
+		let top = Infinity;
+		for (const rect of arrangeShown(state, info, 'p').rects.values()) {
+			top = Math.min(top, rect.y);
+		}
+
+		assert.strictEqual(top, 0);
+	});
+
 	test('clicking the top strip turns back', () => {
 		const { info, state } = makeFolder(7);
 		turnPage(state, info, 'p', 'bottom');
