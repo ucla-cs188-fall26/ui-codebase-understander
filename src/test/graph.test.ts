@@ -8,8 +8,8 @@ import { assignColumns, findBackEdges } from '../layout/columns';
 import { defaultLayout, GAP } from '../layout/defaultLayout';
 import { arrowHead, arrowPath, arrowWidth, chooseSides, placeArrows } from '../layout/arrows';
 import { fitCamera, MAX_SCALE, zoomAt } from '../layout/camera';
-import { boundsOf } from '../layout/geometry';
-import { arrangeChildren, arrangeShown, boxSize, changeSize, buildGraphInfo, childOrigin, closeNode, copyLayoutState, createLayoutState, defaultSize, GraphInfo, LayoutState, moveTo, openNode, PADDING, resetNode, resizeTo, turnPage } from '../layout/state';
+import { boundsOf, subtractRect } from '../layout/geometry';
+import { arrangeChildren, arrangeShown, boxSize, changeSize, buildGraphInfo, childOrigin, closeNode, copyLayoutState, createLayoutState, defaultSize, GraphInfo, LayoutState, moveTo, openNode, PADDING, hiddenSides, listPages, resetNode, resizeTo, showNode, turnPage, turnToPage } from '../layout/state';
 import { arrowTouches, arrowZIndex, boxesUnderArrow, boxZIndexes, placeBoxes, placeStrips, stripId, visibleEdges } from '../layout/place';
 import { fromSaved, toSaved } from '../layout/saved';
 import { dragTo, dropAt, settleDrop } from '../layout/drop';
@@ -488,6 +488,29 @@ suite('boundsOf', () => {
 
 		assert.deepStrictEqual(boundsOf(rects), { x: 0, y: 0, width: 250, height: 150 });
 		assert.strictEqual(boundsOf([]), undefined);
+	});
+});
+
+suite('subtractRect', () => {
+	test('leaves a box alone when the other doesn\'t overlap it', () => {
+		const a = { x: 0, y: 0, width: 100, height: 50 };
+
+		assert.deepStrictEqual(subtractRect(a, { x: 200, y: 0, width: 50, height: 50 }), [a]);
+	});
+
+	test('leaves the parts around a hole in the middle, without overlapping', () => {
+		const pieces = subtractRect({ x: 0, y: 0, width: 100, height: 100 }, { x: 40, y: 40, width: 20, height: 20 });
+
+		assert.deepStrictEqual(pieces, [
+			{ x: 0, y: 0, width: 100, height: 40 },
+			{ x: 0, y: 60, width: 100, height: 40 },
+			{ x: 0, y: 40, width: 40, height: 20 },
+			{ x: 60, y: 40, width: 40, height: 20 },
+		]);
+	});
+
+	test('leaves nothing when the other covers it', () => {
+		assert.deepStrictEqual(subtractRect({ x: 10, y: 10, width: 20, height: 20 }, { x: 0, y: 0, width: 100, height: 100 }), []);
 	});
 });
 
@@ -1082,6 +1105,67 @@ suite('pages', () => {
 		assert.ok(boxSize(state, info, 'p').height > before.height);
 	});
 
+	test('lists the pages with children in reading order, marking the current one', () => {
+		const { info, state } = makeFolder(7);
+
+		const pages = listPages(state, info, 'p');
+
+		assert.strictEqual(pages.length, 2);
+		assert.ok(pages[0].isCurrent && !pages[1].isCurrent);
+		assert.strictEqual(pages[0].childIds.length, CHILD_LIMIT);
+		assert.deepStrictEqual(pages[1].childIds, ['p/f16.ts', 'p/f17.ts']);
+		turnPage(state, info, 'p', 'bottom');
+		assert.ok(listPages(state, info, 'p')[1].isCurrent);
+	});
+
+	test('lists pages row by row, left to right, and leaves out empty ones', () => {
+		const { info, state } = makeFolder(7);
+
+		// a child two columns over: the empty column between isn't listed
+		state.childPages.set('p/f17.ts', { column: 2, row: 0 });
+		const cells: string[] = [];
+		for (const page of listPages(state, info, 'p')) {
+			cells.push(page.cell.column + ',' + page.cell.row);
+		}
+
+		assert.deepStrictEqual(cells, ['0,0', '2,0', '0,1']);
+	});
+
+	test('picking a page from the list turns straight to it, keeping the size', () => {
+		const { info, state } = makeFolder(7);
+		const sizeBefore = boxSize(state, info, 'p');
+
+		turnToPage(state, info, 'p', listPages(state, info, 'p')[1].cell);
+
+		assert.deepStrictEqual(Array.from(arrangeShown(state, info, 'p').rects.keys()).toSorted(), ['p/f16.ts', 'p/f17.ts']);
+		assert.deepStrictEqual(boxSize(state, info, 'p'), sizeBefore);
+	});
+
+	test('lists one page when everything fits', () => {
+		const { info, state } = makeFolder(3);
+
+		assert.strictEqual(listPages(state, info, 'p').length, 1);
+	});
+
+	test('showing a node on a later page turns its directory to that page', () => {
+		const { info, state } = makeFolder(7);
+
+		showNode(state, info, 'p/f17.ts');
+
+		assert.ok(arrangeShown(state, info, 'p').rects.has('p/f17.ts'));
+	});
+
+	test('showing a node opens every closed directory around it', () => {
+		const info = makeInfo();
+		const state = createLayoutState();
+		openNode(state, info, ROOT_ID);
+
+		showNode(state, info, 'src/lib/b.ts');
+
+		assert.ok(state.expanded.has('src') && state.expanded.has('src/lib'));
+		assert.ok(arrangeShown(state, info, 'src/lib').rects.has('src/lib/b.ts'));
+	});
+
 	test('resetting the directory puts it back on its first page', () => {
 		const { info, state } = makeFolder(7);
 		turnPage(state, info, 'p', 'bottom');
@@ -1091,6 +1175,85 @@ suite('pages', () => {
 
 		assert.strictEqual(shown.rects.size, CHILD_LIMIT);
 		assert.strictEqual(shown.hiddenBottom.length, 2);
+	});
+});
+
+suite('resizing pages', () => {
+	// seven files in one column; the first page holds the first CHILD_LIMIT
+	function makeFolder() {
+		const paths: string[] = [];
+		for (let i = 1; i <= 7; i++) {
+			paths.push('p/f' + (i + 10) + '.ts');
+		}
+		const info = buildGraphInfo({ nodes: buildTree('repo', paths), edges: [] });
+		const state = createLayoutState();
+		openNode(state, info, ROOT_ID);
+		openNode(state, info, 'p');
+		return { info: info, state: state };
+	}
+
+	test('making a directory bigger shows more children, at full spacing', () => {
+		const { info, state } = makeFolder();
+		const fits = boxSize(state, info, 'p');
+
+		resizeTo(state, info, 'p', { width: fits.width, height: fits.height + 1000 });
+		const shown = arrangeShown(state, info, 'p');
+
+		assert.strictEqual(shown.rects.size, 7);
+		assert.deepStrictEqual(shown.hiddenBottom, []);
+		for (const [id, rect] of shown.rects) {
+			assert.strictEqual(rect.y, state.homes.get(id)!.y);
+		}
+	});
+
+	test('making it a little smaller squishes the page, keeping its children', () => {
+		const { info, state } = makeFolder();
+		const fits = boxSize(state, info, 'p');
+
+		resizeTo(state, info, 'p', { width: fits.width, height: fits.height - 20 });
+		const shown = arrangeShown(state, info, 'p');
+
+		assert.strictEqual(shown.rects.size, CHILD_LIMIT);
+		assert.strictEqual(shown.hiddenBottom.length, 2);
+	});
+
+	test('making it much smaller moves children to the next page, so a strip only ever holds other pages', () => {
+		const { info, state } = makeFolder();
+		const fits = boxSize(state, info, 'p');
+
+		resizeTo(state, info, 'p', { width: fits.width, height: 0 });
+		const shown = arrangeShown(state, info, 'p');
+
+		assert.strictEqual(shown.rects.size, 3);
+		assert.strictEqual(shown.hiddenBottom.length, 4);
+		assert.deepStrictEqual(shown.hiddenBottom.toSorted(), hiddenSides(state, info, 'p').bottom.toSorted());
+	});
+
+	test('growing back undoes shrinking exactly', () => {
+		const { info, state } = makeFolder();
+		const fits = boxSize(state, info, 'p');
+		const pagesBefore = new Map(state.childPages);
+
+		resizeTo(state, info, 'p', { width: fits.width, height: 0 });
+		resizeTo(state, info, 'p', fits);
+
+		for (const id of info.childrenById.get('p')!) {
+			assert.deepStrictEqual(state.childPages.get(id), pagesBefore.get(id));
+		}
+	});
+
+	test('resizing keeps the page\'s top-left where it was', () => {
+		const { info, state } = makeFolder();
+		turnPage(state, info, 'p', 'bottom');
+		const fits = boxSize(state, info, 'p');
+
+		resizeTo(state, info, 'p', { width: fits.width, height: fits.height + 1000 });
+		const shown = arrangeShown(state, info, 'p');
+
+		// still showing from the second page's first box down, not back at the first page
+		assert.ok(shown.rects.has('p/f16.ts') && shown.rects.has('p/f17.ts'));
+		assert.ok(!shown.rects.has('p/f11.ts'));
+		assert.strictEqual(shown.rects.get('p/f16.ts')!.y, 0);
 	});
 });
 

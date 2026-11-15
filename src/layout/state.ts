@@ -23,11 +23,15 @@ export interface PageCell {
 	row: number;
 }
 
-// which page a directory shows, and how big its pages are, in its layout's coordinates
+// which page a directory shows, and how big its pages are, in its layout's coordinates. Pages are cut from an anchor:
+// the layout's top-left at first, and the current page's top-left after a resize, so resizing keeps the same part of
+// the layout in view. Columns and rows count from the anchor, so pages left of or above it have negative ones
 export interface Page {
 	column: number;
 	row: number;
-	size: Size;
+	anchor: Position;
+	size: Size; // the page as it is now; smaller than natural while the box is too small to squish its page into
+	natural: Size; // the page at full spacing: what it opened at, or bigger once the user made the box bigger
 }
 
 // the four sides of a box, where its strips can be
@@ -161,11 +165,15 @@ export function copyLayoutState(state: LayoutState): LayoutState {
 /**
  * Finds which page a spot in a directory's layout is on: the one holding it.
  * @param position A spot in the layout, like a box's home.
+ * @param anchor Where the pages are cut from.
  * @param size The directory's page size.
- * @returns How many pages across and down it is.
+ * @returns How many pages across and down it is from the anchor.
  */
-function cellOf(position: Position, size: Size): PageCell {
-	return { column: Math.floor(position.x / size.width), row: Math.floor(position.y / size.height) };
+function cellOf(position: Position, anchor: Position, size: Size): PageCell {
+	return {
+		column: Math.floor((position.x - anchor.x) / size.width),
+		row: Math.floor((position.y - anchor.y) / size.height),
+	};
 }
 
 /**
@@ -179,7 +187,7 @@ export function pageOrigin(state: LayoutState, parentId: string): Position {
 	if (page === undefined) {
 		return { x: 0, y: 0 };
 	}
-	return { x: page.column * page.size.width, y: page.row * page.size.height };
+	return { x: page.anchor.x + page.column * page.size.width, y: page.anchor.y + page.row * page.size.height };
 }
 
 /**
@@ -256,6 +264,57 @@ export function hiddenSides(state: LayoutState, info: GraphInfo, parentId: strin
 	return sides;
 }
 
+// one of a directory's pages that has children on it, for listing them
+export interface PageListing {
+	cell: PageCell;
+	childIds: string[]; // the children on it, most important first
+	isCurrent: boolean;
+}
+
+/**
+ * Lists a directory's pages that have children on them, in reading order: top to bottom, and left to right within a
+ * row of pages. Empty pages are left out, the same as turning skips them, except the current page, which is always
+ * listed so it has a place.
+ * @param state The view state.
+ * @param info The graph lookups.
+ * @param id The directory.
+ * @returns Its pages, or nothing if it has no pages.
+ */
+export function listPages(state: LayoutState, info: GraphInfo, id: string): PageListing[] {
+	const page = state.pages.get(id);
+	if (page === undefined) {
+		return [];
+	}
+
+	// one listing per page, found by its column and row
+	const byCell = new Map<string, PageListing>();
+	function listingFor(cell: PageCell): PageListing {
+		const key = cell.column + ',' + cell.row;
+		let listing = byCell.get(key);
+		if (listing === undefined) {
+			listing = { cell: cell, childIds: [], isCurrent: cell.column === page!.column && cell.row === page!.row };
+			byCell.set(key, listing);
+		}
+		return listing;
+	}
+
+	listingFor({ column: page.column, row: page.row });
+	for (const childId of info.childrenById.get(id) ?? []) {
+		const cell = state.childPages.get(childId);
+		if (cell !== undefined) {
+			listingFor(cell).childIds.push(childId);
+		}
+	}
+
+	function readingOrder(a: PageListing, b: PageListing): number {
+		if (a.cell.row !== b.cell.row) {
+			return a.cell.row - b.cell.row;
+		}
+		return a.cell.column - b.cell.column;
+	}
+	return Array.from(byCell.values()).sort(readingOrder);
+}
+
 /**
  * Turns a directory to the next page on one side, the way clicking that side's strip does: the nearest page that way
  * with children on it, so a turn never lands on an empty page. Only the page changes: no home moves, and no child
@@ -296,7 +355,7 @@ export function turnPage(state: LayoutState, info: GraphInfo, id: string, side: 
 	// the box fits its page, so a page with bigger or more boxes changes its size, and its neighbors make room
 	const target = nearest;
 	function turn(): void {
-		state.pages.set(id, { column: target.column, row: target.row, size: page!.size });
+		state.pages.set(id, { column: target.column, row: target.row, anchor: page!.anchor, size: page!.size, natural: page!.natural });
 	}
 	changeSize(state, info, id, turn);
 }
@@ -732,7 +791,8 @@ function givePages(state: LayoutState, info: GraphInfo, parentId: string, newIds
 			width = Math.max(width, home.x + size.width + GAP);
 			height = Math.max(height, home.y + size.height + GAP);
 		}
-		page = { column: 0, row: 0, size: { width: width, height: height } };
+		const size = { width: width, height: height };
+		page = { column: 0, row: 0, anchor: { x: 0, y: 0 }, size: size, natural: size };
 		state.pages.set(parentId, page);
 
 		// new pages, so every child is placed on one
@@ -742,7 +802,7 @@ function givePages(state: LayoutState, info: GraphInfo, parentId: string, newIds
 	for (const id of needPages) {
 		const home = state.homes.get(id);
 		if (home !== undefined) {
-			state.childPages.set(id, cellOf(home, page.size));
+			state.childPages.set(id, cellOf(home, page.anchor, page.size));
 		}
 	}
 }
@@ -913,12 +973,149 @@ function setSize(state: LayoutState, info: GraphInfo, id: string, size: Size): v
 	// open and closed sizes are kept apart, so resizing one doesn't change the other
 	if (isOpen) {
 		state.openSizes.set(id, clamped);
+		fitPageToSize(state, info, id);
 	} else {
 		state.closedSizes.set(id, clamped);
 	}
 
 	// a box that grew past its directory's edge makes the directory grow, the same as a drop
 	growToFit(state, info, id);
+}
+
+/**
+ * Fits a directory's page to the size the user gave it: bigger shows more, as the page widens to fill the box; smaller
+ * first squishes the page, and once it can't, the page gets smaller and the children that no longer fit move to the
+ * next page. The page's top-left stays where it is, and every child's page is worked out again from there. Growing
+ * reverses shrinking exactly, since the page depends only on the box's size, up to its natural size.
+ * @param state The view state. The directory's page and its children's pages change.
+ * @param info The graph lookups.
+ * @param id The directory, open, with a size the user gave it.
+ */
+function fitPageToSize(state: LayoutState, info: GraphInfo, id: string): void {
+	const set = state.openSizes.get(id);
+	if (set === undefined || !state.pages.has(id)) {
+		return;
+	}
+	const anchor = pageOrigin(state, id);
+
+	// a strip can come or go as children change pages, which changes the room inside, so this settles over a few rounds
+	for (let round = 0; round < 3; round++) {
+		const page = state.pages.get(id)!;
+		const origin = childOrigin(state, info, id);
+		const room = stripRoom(state, info, id);
+		const inside = { width: set.width - origin.x - PADDING - room.right, height: set.height - origin.y - PADDING - room.bottom };
+
+		// a page includes the gap after its last boxes, which the inside doesn't need to show
+		const natural = { width: Math.max(page.natural.width, inside.width + GAP), height: Math.max(page.natural.height, inside.height + GAP) };
+		let width = natural.width;
+		if (inside.width + GAP < natural.width) {
+			width = largestFittingPage(state, info, id, anchor, 'across', inside, natural.width, natural.height);
+		}
+		let height = natural.height;
+		if (inside.height + GAP < natural.height) {
+			height = largestFittingPage(state, info, id, anchor, 'down', inside, width, natural.height);
+		}
+
+		const size = { width: width, height: height };
+		state.pages.set(id, { column: 0, row: 0, anchor: anchor, size: size, natural: natural });
+		let changed = false;
+		for (const childId of info.childrenById.get(id) ?? []) {
+			const home = state.homes.get(childId);
+			if (home !== undefined) {
+				const cell = cellOf(home, anchor, size);
+				const old = state.childPages.get(childId);
+				if (old === undefined || old.column !== cell.column || old.row !== cell.row) {
+					changed = true;
+				}
+				state.childPages.set(childId, cell);
+			}
+		}
+		if (!changed) {
+			return;
+		}
+	}
+}
+
+/**
+ * Fits every open directory's page to the size the user gave it, as resizing does. A layout saved before pages
+ * followed sizes may show a page too big for its box, which would squish boxes off it; this moves them to the next page
+ * instead.
+ * @param state The view state. Pages may change.
+ * @param info The graph lookups.
+ */
+export function fitPagesToSizes(state: LayoutState, info: GraphInfo): void {
+	for (const id of state.expanded) {
+		fitPageToSize(state, info, id);
+	}
+}
+
+/**
+ * Finds the biggest a page can be in one direction and still squish into the box: the children whose homes fall in a
+ * window that big, from the anchor, fit inside at their smallest gaps. Only the spots where a child's home starts can
+ * change what's in the window, so only those are tried, biggest first.
+ * @param state The view state.
+ * @param info The graph lookups.
+ * @param id The directory.
+ * @param anchor The page's top-left, which stays put.
+ * @param direction 'across' to find the width, 'down' to find the height.
+ * @param inside The room inside the box for its page.
+ * @param width The window's width: the most to try across, or the width already found, going down.
+ * @param height The window's height: the most to try down, or the full height, going across.
+ * @returns The page's size in that direction.
+ */
+function largestFittingPage(state: LayoutState, info: GraphInfo, id: string, anchor: Position, direction: 'across' | 'down', inside: Size, width: number, height: number): number {
+	// the children in a window of the given size, measured from the anchor
+	function childrenWithin(windowWidth: number, windowHeight: number): Map<string, Rect> {
+		const rects = new Map<string, Rect>();
+		for (const childId of info.childrenById.get(id) ?? []) {
+			const home = state.homes.get(childId);
+			if (home === undefined) {
+				continue;
+			}
+			const x = home.x - anchor.x;
+			const y = home.y - anchor.y;
+			if (x >= 0 && x < windowWidth && y >= 0 && y < windowHeight) {
+				const size = boxSize(state, info, childId);
+				rects.set(childId, { x: x, y: y, width: size.width, height: size.height });
+			}
+		}
+		return rects;
+	}
+
+	// whether a window's children squish into the box without hiding any: across first, then down on what that drew,
+	// as arrangeShown does. A squish that only fits by hiding boxes doesn't count, since only pages hide boxes
+	function fits(windowWidth: number, windowHeight: number): boolean {
+		const across = squishHorizontally(childrenWithin(windowWidth, windowHeight), inside.width);
+		if (!across.fits || across.hidden.length > 0) {
+			return false;
+		}
+		if (direction === 'across') {
+			return true;
+		}
+		const down = squishVertically(across.rects, inside.height);
+		return down.fits && down.hidden.length === 0;
+	}
+
+	// the most, then every spot where a child starts, biggest first; a window ending at a child's start leaves it out
+	const most = direction === 'across' ? width : height;
+	const tries = [most];
+	for (const rect of childrenWithin(width, height).values()) {
+		const start = direction === 'across' ? rect.x : rect.y;
+		if (start > 0 && start < most) {
+			tries.push(start);
+		}
+	}
+	tries.sort(function biggestFirst(a: number, b: number): number {
+		return b - a;
+	});
+
+	for (const size of tries) {
+		const fitsHere = direction === 'across' ? fits(size, height) : fits(width, size);
+		if (fitsHere) {
+			return size;
+		}
+	}
+	return tries[tries.length - 1];
 }
 
 /**
@@ -934,6 +1131,47 @@ export function openNode(state: LayoutState, info: GraphInfo, id: string): void 
 		layOutChildren(state, info, id);
 	}
 	changeSize(state, info, id, open);
+}
+
+/**
+ * Shows a node: opens every directory holding it, from the top down, and turns each to the page the next one down is
+ * on, so the node has a box in view. It's on its page, but not necessarily in the page's middle.
+ * @param state The view state.
+ * @param info The graph lookups.
+ * @param id The node to show.
+ */
+export function showNode(state: LayoutState, info: GraphInfo, id: string): void {
+	// the lineage runs from the node up to the root; go from the root down, each directory then the one inside it
+	const lineage = getLineage(id, info.nodesById);
+	for (let i = lineage.length - 1; i >= 1; i--) {
+		const parentId = lineage[i];
+		if (!state.expanded.has(parentId)) {
+			openNode(state, info, parentId);
+		}
+		const cell = state.childPages.get(lineage[i - 1]);
+		if (cell !== undefined) {
+			turnToPage(state, info, parentId, cell);
+		}
+	}
+}
+
+/**
+ * Turns a directory straight to one of its pages, like picking it from the list of pages, if it isn't there already.
+ * Like any page turn, only the page changes.
+ * @param state The view state.
+ * @param info The graph lookups.
+ * @param id The directory.
+ * @param cell The page to show.
+ */
+export function turnToPage(state: LayoutState, info: GraphInfo, id: string, cell: PageCell): void {
+	const page = state.pages.get(id);
+	if (page === undefined || (cell.column === page.column && cell.row === page.row)) {
+		return;
+	}
+	function turn(): void {
+		state.pages.set(id, { column: cell.column, row: cell.row, anchor: page!.anchor, size: page!.size, natural: page!.natural });
+	}
+	changeSize(state, info, id, turn);
 }
 
 /**

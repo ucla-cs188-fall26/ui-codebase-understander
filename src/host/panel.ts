@@ -517,6 +517,75 @@ function buildHtml(scriptUri: vscode.Uri): string {
 		.box.selected > .box-title {
 			cursor: move;
 		}
+		/* the root can't be moved, so its title doesn't offer to */
+		.box.repo.selected > .box-title {
+			cursor: default;
+		}
+		/* which page an open directory is on, dimmed just after its name; clicking it lists the pages */
+		.page-counter {
+			flex-shrink: 0;
+			margin-left: 6px;
+			padding: 1px 5px;
+			border: none;
+			border-radius: 4px;
+			background: none;
+			color: var(--vscode-descriptionForeground);
+			font: inherit;
+			font-size: 11px;
+			cursor: pointer;
+		}
+		.page-counter:hover {
+			background: var(--vscode-toolbar-hoverBackground);
+			color: var(--vscode-editor-foreground);
+		}
+		/* the list of a directory's pages, below its page number */
+		#page-menu {
+			display: none;
+			position: fixed;
+			z-index: 1001;
+			min-width: 180px;
+			max-width: 320px;
+			max-height: 50vh;
+			flex-direction: column;
+			padding: 4px;
+			overflow-y: auto;
+			border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+			border-radius: 6px;
+			background: var(--vscode-editorWidget-background);
+			color: var(--vscode-editorWidget-foreground);
+			box-shadow: 0 4px 16px var(--vscode-widget-shadow);
+		}
+		#page-menu.visible {
+			display: flex;
+		}
+		.page-menu-item {
+			display: flex;
+			gap: 8px;
+			padding: 4px 8px;
+			border: none;
+			border-radius: 4px;
+			background: none;
+			color: inherit;
+			font: inherit;
+			text-align: left;
+			cursor: pointer;
+		}
+		.page-menu-item:hover {
+			background: var(--vscode-list-hoverBackground);
+		}
+		.page-menu-item.current {
+			background: var(--vscode-list-inactiveSelectionBackground);
+		}
+		.page-menu-number {
+			flex-shrink: 0;
+			min-width: 1.2em;
+			color: var(--vscode-descriptionForeground);
+		}
+		.page-menu-names {
+			overflow: hidden;
+			white-space: nowrap;
+			text-overflow: ellipsis;
+		}
 		/* muted dots at the right end of the selected box's title, a sign that it can be dragged */
 		.grip {
 			display: flex;
@@ -1007,6 +1076,7 @@ function buildHtml(scriptUri: vscode.Uri): string {
 	<aside id="flow-results" aria-live="polite"></aside>
 	<aside id="flow-description"></aside>
 	<div id="toolbar"></div>
+	<div id="page-menu"></div>
 	<script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;

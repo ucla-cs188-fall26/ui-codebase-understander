@@ -4,8 +4,8 @@ import { connections, isInside } from '../analysis/edges';
 import { getLineage, groupByParent } from '../analysis/lookups';
 import { Arrow, arrowHead, arrowPath, arrowWidth, placeArrows } from '../layout/arrows';
 import { Camera, fitCamera, zoomAt } from '../layout/camera';
-import { boundsOf, Position, Rect, Size } from '../layout/geometry';
-import { arrangeShown, boxSize, buildGraphInfo, closeNode, copyLayoutState, createLayoutState, GraphInfo, layOutChildren, LayoutState, openNode, resetNode, resizeTo, StripSide, turnPage } from '../layout/state';
+import { boundsOf, Position, Rect, Size, subtractRect } from '../layout/geometry';
+import { arrangeShown, boxSize, buildGraphInfo, closeNode, copyLayoutState, createLayoutState, fitPagesToSizes, listPages, GraphInfo, layOutChildren, LayoutState, openNode, resetNode, resizeTo, StripSide, turnPage, PageListing, showNode, turnToPage } from '../layout/state';
 import { ArrowMode, fromSaved, toSaved } from '../layout/saved';
 import { dragTo, dropAt } from '../layout/drop';
 import { makeArrowsIcon, makeCloseIcon, makeFitIcon, makeGripIcon, makeOpenIcon, makeResetIcon, makeResizeIcon, makeSettingsIcon, SVG_NS } from './icons';
@@ -54,6 +54,118 @@ function makeBox(label: string, kind: string, x: number, y: number, width: numbe
 }
 
 /**
+ * Makes the page number in an open directory's title, just after its name: which page it's on, in reading order, out
+ * of how many have children. Clicking it lists the pages, to jump to one.
+ * @param id The directory.
+ * @param pages Its pages, from listPages.
+ * @returns The element.
+ */
+function makePageCounter(id: string, pages: PageListing[]): HTMLElement {
+	let current = 1;
+	for (let i = 0; i < pages.length; i++) {
+		if (pages[i].isCurrent) {
+			current = i + 1;
+		}
+	}
+
+	const counter = document.createElement('button');
+	counter.className = 'page-counter';
+	counter.dataset.id = id;
+	counter.textContent = current + '/' + pages.length;
+	counter.title = 'Page ' + current + ' of ' + pages.length + '. Click to pick another';
+	counter.addEventListener('click', openPageMenu);
+	return counter;
+}
+
+/**
+ * Opens the list of a directory's pages just below its page number, each with the first few names on it, so one can
+ * be picked to jump to.
+ * @param event The browser's mouse event, on a page number.
+ */
+function openPageMenu(event: MouseEvent): void {
+	// handled here, so the click doesn't also select the box
+	event.stopPropagation();
+	if (info === undefined) {
+		return;
+	}
+	const counter = event.currentTarget as HTMLElement;
+	const id = counter.dataset.id!;
+
+	const menu = document.getElementById('page-menu')!;
+	menu.replaceChildren();
+	const pages = listPages(state, info, id);
+	for (let i = 0; i < pages.length; i++) {
+		menu.appendChild(makePageMenuItem(id, pages[i], i + 1));
+	}
+
+	// below the page number, where it is on screen now
+	const place = counter.getBoundingClientRect();
+	menu.style.left = place.left + 'px';
+	menu.style.top = (place.bottom + 4) + 'px';
+	menu.classList.add('visible');
+}
+
+// how many names a page's entry in the list shows before "+N"
+const PAGE_MENU_NAMES = 3;
+
+/**
+ * Makes one entry in the list of pages: its number, then the first few names on it.
+ * @param id The directory.
+ * @param page The page.
+ * @param number Its number, in reading order.
+ * @returns The element.
+ */
+function makePageMenuItem(id: string, page: PageListing, number: number): HTMLElement {
+	const names: string[] = [];
+	for (const childId of page.childIds.slice(0, PAGE_MENU_NAMES)) {
+		names.push(info!.nodesById.get(childId)!.name);
+	}
+	let text = names.join(', ');
+	if (page.childIds.length > PAGE_MENU_NAMES) {
+		text += ' +' + (page.childIds.length - PAGE_MENU_NAMES);
+	}
+
+	const item = document.createElement('button');
+	item.className = 'page-menu-item';
+	if (page.isCurrent) {
+		item.classList.add('current');
+	}
+	const numberElement = document.createElement('span');
+	numberElement.className = 'page-menu-number';
+	numberElement.textContent = String(number);
+	item.appendChild(numberElement);
+	const namesElement = document.createElement('span');
+	namesElement.className = 'page-menu-names';
+	namesElement.textContent = text;
+	item.appendChild(namesElement);
+
+	function pick(): void {
+		turnToPage(state, info!, id, page.cell);
+		closePageMenu();
+		drawGraph();
+	}
+	item.addEventListener('click', pick);
+	return item;
+}
+
+/**
+ * Closes the list of pages.
+ */
+function closePageMenu(): void {
+	document.getElementById('page-menu')!.classList.remove('visible');
+}
+
+/**
+ * Closes the list of pages on a press anywhere outside it.
+ * @param event The browser's pointer event.
+ */
+function closePageMenuOutside(event: PointerEvent): void {
+	if (!event.composedPath().includes(document.getElementById('page-menu')!)) {
+		closePageMenu();
+	}
+}
+
+/**
  * Checks whether an edge is the one the sidebar is showing.
  * @param edge A visible edge.
  * @returns True if it's the selected arrow's edge.
@@ -69,9 +181,11 @@ function isSelectedEdge(edge: Edge): boolean {
  * @param zIndex How high it paints, from arrowZIndex.
  * @param under The boxes it passes under, from boxesUnderArrow, in page coordinates; it's cut out where it crosses them.
  * @param faint True to draw it faintly, for an arrow that isn't the selected box's in the default arrow setting.
+ * @param uncovered An area where nothing fades it, like a dragged box it's drawn on, which paints on top of the boxes
+ *   around it; undefined for none.
  * @returns The svg element holding the arrow.
  */
-function makeArrow(arrow: Arrow, edge: VisibleEdge, zIndex: number, under: Rect[], faint: boolean): SVGSVGElement {
+function makeArrow(arrow: Arrow, edge: VisibleEdge, zIndex: number, under: Rect[], faint: boolean, uncovered: Rect | undefined): SVGSVGElement {
 	const svg = document.createElementNS(SVG_NS, 'svg');
 	svg.classList.add('arrow');
 
@@ -133,6 +247,10 @@ function makeArrow(arrow: Arrow, edge: VisibleEdge, zIndex: number, under: Rect[
 		for (let band = FADE_BANDS; band >= 1; band--) {
 			fade.appendChild(makeMaskRect(rect, band * FADE_STEP, 'black', FADE_DARKEN));
 		}
+	}
+	if (uncovered !== undefined) {
+		// drawn last, so it shows the arrow in full there again
+		fade.appendChild(makeMaskRect(uncovered, 0, 'white', 1));
 	}
 	defs.appendChild(fade);
 	svg.appendChild(defs);
@@ -312,6 +430,12 @@ function drawGraph(): void {
 	const arrows = placeArrows(edges, arrowRects);
 
 	nextArrowId = 0;
+
+	// the box being dragged, which paints on top of everything around it
+	let dragged: Rect | undefined = undefined;
+	if (isDragging && drag !== undefined) {
+		dragged = rects.get(drag.id);
+	}
 	for (let i = 0; i < arrows.length; i++) {
 		// while dragging, the dragged box's own arrow to something under it would be a stub pointing back into it
 		if (endsUnderDraggedBox(arrows[i], rects)) {
@@ -327,11 +451,23 @@ function drawGraph(): void {
 		}
 		const faint = !lit && arrowMode === 'default';
 
+		// an arrow drawn on the dragged box isn't cut where the dragged box covers other boxes, since it paints on
+		// top of them
+		const onDragged = dragged !== undefined
+			&& (isInside(nodeOfEnd(edges[i].from), drag!.id, info.nodesById) || isInside(nodeOfEnd(edges[i].to), drag!.id, info.nodesById));
 		const under: Rect[] = [];
 		for (const id of boxesUnderArrow(edges[i], info, rects)) {
-			under.push(rects.get(id)!);
+			const rect = rects.get(id)!;
+			if (onDragged) {
+				for (const piece of subtractRect(rect, dragged!)) {
+					under.push(piece);
+				}
+			} else {
+				under.push(rect);
+			}
 		}
-		world.appendChild(makeArrow(arrows[i], edges[i], arrowZIndex(edges[i], state, info, boxZ), under, faint));
+		const uncovered = onDragged ? dragged : undefined;
+		world.appendChild(makeArrow(arrows[i], edges[i], arrowZIndex(edges[i], state, info, boxZ), under, faint, uncovered));
 	}
 
 	for (const [id, rect] of rects) {
@@ -354,6 +490,12 @@ function drawGraph(): void {
 			chevron.className = 'chevron';
 			chevron.textContent = isOpen ? '▾' : '▸';
 			box.querySelector('.box-title')!.prepend(chevron);
+		}
+
+		// which page an open directory is on, just after its name; nothing when everything fits on one
+		const pages = isOpen ? listPages(state, info, id) : [];
+		if (pages.length > 1) {
+			box.querySelector('.box-title')!.appendChild(makePageCounter(id, pages));
 		}
 
 		// a grip at the title's right end, so it's clear the title is where to grab the box; the root can't be dragged
@@ -426,7 +568,7 @@ function drawFlowGraph(view: FlowGraphMessage): void {
 	for (let i = 0; i < arrows.length; i++) {
 		// the flow's boxes sit in one row, so no arrow passes under any
 		const flowEdge = view.graph.edges[i];
-		world.appendChild(makeArrow(arrows[i], { from: flowEdge.from, to: flowEdge.to, kind: flowEdge.kind, count: 1, edges: [flowEdge] }, 1, [], false));
+		world.appendChild(makeArrow(arrows[i], { from: flowEdge.from, to: flowEdge.to, kind: flowEdge.kind, count: 1, edges: [flowEdge] }, 1, [], false, undefined));
 	}
 	view.graph.nodes.forEach((node: Node, index) => {
 		const rect = rects.get(node.id)!;
@@ -750,12 +892,13 @@ function makeLinkRow(id: string, text: string, extraClass: string): HTMLElement 
 }
 
 /**
- * Selects the node a sidebar row names, opening the boxes around it so it can be seen.
+ * Selects the node a sidebar row names, opening the boxes around it and turning each to the right page, so it can be
+ * seen.
  * @param event The browser's mouse event. Its currentTarget is the row, which carries the node's id.
  */
 function handleConnectionClick(event: MouseEvent): void {
 	const id = (event.currentTarget as HTMLElement).dataset.id!;
-	revealNode(id);
+	showNode(state, info!, id);
 	selectedId = id;
 	drawGraph();
 	centerOn(id);
@@ -826,23 +969,6 @@ function stopGliding(): void {
 }
 
 /**
- * Opens every box containing a node, from the top down, so the node gets a box of its own.
- * A node behind "+N more" still won't have one until strips exist.
- * @param id The node to reveal.
- */
-function revealNode(id: string): void {
-	if (info === undefined) {
-		return;
-	}
-
-	// the lineage runs from the node up to the root; open from the root down, skipping the node itself
-	const lineage = getLineage(id, info.nodesById);
-	for (let i = lineage.length - 1; i >= 1; i--) {
-		openNode(state, info, lineage[i]);
-	}
-}
-
-/**
  * Clears the selection, which hides the sidebar.
  */
 function handleSidebarClose(): void {
@@ -863,6 +989,7 @@ function isOnOverlay(event: Event): boolean {
 	const path = event.composedPath();
 	return path.includes(document.getElementById('sidebar')!)
 		|| path.includes(document.getElementById('toolbar')!)
+		|| path.includes(document.getElementById('page-menu')!)
 		|| path.includes(document.getElementById('flow-results')!)
 		|| path.includes(document.getElementById('flow-description')!);
 }
@@ -1011,6 +1138,7 @@ function closePopupsOutside(event: PointerEvent): void {
 function closePopupsOnEscape(event: KeyboardEvent): void {
 	if (event.key === 'Escape') {
 		closePopups();
+		closePageMenu();
 	}
 }
 
@@ -1137,6 +1265,7 @@ function drawToolbar(): void {
 	settings.className = 'popup';
 	settingsAnchor.appendChild(settings);
 	document.addEventListener('pointerdown', closePopupsOutside);
+	document.addEventListener('pointerdown', closePageMenuOutside);
 	document.addEventListener('keydown', closePopupsOnEscape);
 
 	settings.appendChild(makePopupHeading('Language model'));
@@ -1347,6 +1476,9 @@ function saveLayout(): void {
  * @param event The browser's wheel event.
  */
 function handleWheel(event: WheelEvent): void {
+	// the list of pages sits where its page number was, which zooming moves
+	closePageMenu();
+
 	// let the sidebar scroll its own lists
 	if (isOnOverlay(event)) {
 		return;
@@ -1396,7 +1528,8 @@ function handlePointerDown(event: PointerEvent): void {
 	pressStart = { x: event.clientX, y: event.clientY };
 
 	const target = event.target as Element;
-	if (isOnOverlay(event) || target.closest('.chevron') !== null) {
+	// a page number opens its own list, so pressing it neither drags nor pans
+	if (isOnOverlay(event) || target.closest('.chevron') !== null || target.closest('.page-counter') !== null) {
 		return;
 	}
 
@@ -1684,6 +1817,10 @@ function handleMessage(event: MessageEvent<ExtensionToWebview>): void {
 		for (const id of state.expanded) {
 			layOutChildren(state, info, id);
 		}
+
+		// a page too big for the size its box was given moves its extra boxes to the next page, instead of squishing
+		// them off
+		fitPagesToSizes(state, info);
 
 		applyCamera();
 		drawGraph();

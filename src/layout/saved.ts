@@ -64,7 +64,15 @@ export function fromSaved(saved: SavedLayout, info: GraphInfo): { state: LayoutS
 	}
 	for (const [id, page] of saved.pages ?? []) {
 		if (info.nodesById.has(id)) {
-			state.pages.set(id, page);
+			// pages saved before resizing could change them have no anchor or natural size: they were cut from the
+			// layout's top-left, at the size they are
+			state.pages.set(id, {
+				column: page.column,
+				row: page.row,
+				anchor: page.anchor ?? { x: 0, y: 0 },
+				size: page.size,
+				natural: page.natural ?? page.size,
+			});
 		}
 	}
 	for (const [id, cell] of saved.childPages ?? []) {

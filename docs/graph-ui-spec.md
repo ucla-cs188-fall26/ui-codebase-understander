@@ -38,6 +38,7 @@ Each rule should become a test.
 
 - Only the selected box can be dragged: by its title strip if it's open, anywhere on it if it's closed. Pressing anywhere else, including unselected boxes and the inside of open directories, pans.
 - A dragged box, with everything inside it, paints on top while dragging. Nothing needs to stay in front afterward, since siblings never overlap once a drop settles.
+- Boxes a dragged box covers never cut the arrows drawn on it, since it paints on top of them.
 - While dragging, the box's home moves with it and its directory grows to hold it, so the directory's neighbors make room as it goes, the same as they will on drop. Nothing it's over is pushed until the drop.
 - A box touching an edge is holding it out, so dragging it inward pulls the edge in, as far as the other boxes allow.
 - Pushing happens on drop only, never while dragging.
@@ -67,7 +68,9 @@ Each rule should become a test.
 - A page turn moves by the page's unsquished size, so a squished directory pages through the same children, drawn tighter.
 - A child stays on the page it's on until the directory is resized or reset; pushing and dragging never move it to another page. A child pushed or dropped past the page's edge stays on the page, and the directory grows to hold it.
 - Turning a page goes to the nearest page that way with children on it, so it never lands on an empty page.
-- When a directory's layout is taller or wider than one page, its title shows where it is, dimmed: `↓ 2/3` for down, `→ 1/2` for across, both if both. A directory that fits on one page shows nothing.
+- When a directory has more than one page, its title shows which one it's on, dimmed just after its name: `2/4`, counting the pages with children in reading order (top to bottom, then left to right). A directory that fits on one page shows nothing.
+- Clicking the page number lists the pages, each with the first few names on it, and picking one turns straight to it. Clicking outside the list, zooming, or pressing Escape closes it.
+- The root's title doesn't show the move cursor, since the root can't be moved.
 - Resizing keeps the window's top-left where it was and recounts the pages.
 - Showing a specific node (from the sidebar, or later a flow step) turns each directory holding it to the page it's on. It's in view, but not necessarily centered.
 - Each directory's page is saved with the layout, so it reopens on the page it was left on.
