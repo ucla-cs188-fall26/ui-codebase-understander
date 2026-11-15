@@ -120,6 +120,7 @@ Each rule should become a test.
 - Positions are saved per workspace and survive closing the graph.
 - The sidebar lists what the selected box imports and what imports it the way its arrows are grouped (the arrow settings' depth), most imports first, each with its count. A folder row opens to the folders and files inside it.
 - Selecting an arrow shows its two ends and how many imports it stands for, then the files at each end, grouped by the folders inside each end's box, opening like the box sidebar's lists.
+- A file row's open button opens that file. Opening the row (▸) lists each place the import is written, and clicking one opens that file with the line selected.
 - **Reset layout** returns to how things first looked: the default layout and sizes, with everything inside closed. It works on the whole graph (after a confirmation) or on one selected node, which stays open or closed as it was.
 
 ## Open questions

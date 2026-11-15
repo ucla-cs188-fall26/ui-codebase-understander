@@ -683,28 +683,36 @@ function drawSidebar(): void {
 	}
 	addDetail(sidebar, 'Times imported', String(info.indegrees.get(selectedId!)));
 
-	// where each row's open button goes: to the import line, in whichever file writes it. A file in "Imported by"
-	// opens at its line importing this box; a file in "Imports" opens this file at its line importing it, which only
-	// makes sense when this box is a file, since a folder's imports are spread across its files
-	const importsAt = new Map<string, OpenAt>();
-	const importedByAt = new Map<string, OpenAt>();
+	// every place each file row's import is written, in the order they're written, listed under the row when it's
+	// opened. Under "Imports", the places inside this box that import the row's file; under "Imported by", the lines
+	// in the row's file that import something in this box
+	const importsAt = new Map<string, ImportLine[]>();
+	const importedByAt = new Map<string, ImportLine[]>();
 	for (const edge of info.edges) {
 		if (edge.lines === undefined) {
 			continue;
 		}
 		const fromInside = isInside(edge.from, selectedId!, info.nodesById);
 		const toInside = isInside(edge.to, selectedId!, info.nodesById);
-		if (toInside && !fromInside && !importedByAt.has(edge.from)) {
-			importedByAt.set(edge.from, { path: edge.from, lines: edge.lines });
+		if (toInside && !fromInside) {
+			// the file in this box it imports
+			addImportLine(importedByAt, edge.from, { path: edge.from, lines: edge.lines, label: pathFrom(selectedId!, edge.to) });
 		}
-		if (node.kind === 'file' && edge.from === selectedId && !importsAt.has(edge.to)) {
-			importsAt.set(edge.to, { path: edge.from, lines: edge.lines });
+		if (fromInside && !toInside) {
+			// the file in this box that imports it
+			addImportLine(importsAt, edge.to, { path: edge.from, lines: edge.lines, label: pathFrom(selectedId!, edge.from) });
 		}
 	}
 
 	const linked = connections(selectedId!, info.edges, info.nodesById);
-	addConnectionList(sidebar, 'Imports', groupLinks(selectedId!, linked.outgoing, info, arrowDepth), undefined, importsAt);
-	addConnectionList(sidebar, 'Imported by', groupLinks(selectedId!, linked.incoming, info, arrowDepth), undefined, importedByAt);
+	addConnectionList(sidebar, 'Imports', groupLinks(selectedId!, linked.outgoing, info, arrowDepth), {
+		hint: 'What this depends on, by importing it',
+		lines: importsAt,
+	});
+	addConnectionList(sidebar, 'Imported by', groupLinks(selectedId!, linked.incoming, info, arrowDepth), {
+		hint: 'What depends on this, by importing it',
+		lines: importedByAt,
+	});
 
 	sidebar.classList.add('visible');
 }
@@ -741,12 +749,12 @@ function drawEdgeSidebar(sidebar: HTMLElement, selected: Edge): void {
 		toCounts.set(edge.to, (toCounts.get(edge.to) ?? 0) + 1);
 	}
 
-	// where each importing file writes its import, so its open button goes there; edges come in the order they're
-	// written, so the first one seen is a file's first import to the other end
-	const fromLines = new Map<string, OpenAt>();
+	// every line where each importing file imports something at the other end, listed under its row when it's opened
+	const fromLines = new Map<string, ImportLine[]>();
 	for (const edge of represented) {
-		if (edge.lines !== undefined && !fromLines.has(edge.from)) {
-			fromLines.set(edge.from, { path: edge.from, lines: edge.lines });
+		if (edge.lines !== undefined) {
+			// the file at the other end it imports
+			addImportLine(fromLines, edge.from, { path: edge.from, lines: edge.lines, label: pathFrom(nodeOfEnd(selected.to), edge.to) });
 		}
 	}
 
@@ -767,8 +775,17 @@ function drawEdgeSidebar(sidebar: HTMLElement, selected: Edge): void {
 	// section headings are plain, so a hidden end just says so in words
 	const fromBox = nodeOfEnd(selected.from);
 	const toBox = nodeOfEnd(selected.to);
-	addConnectionList(sidebar, 'From ' + hiddenPrefix(selected.from) + endName(selected.from), groupInside(fromBox, fromCounts, info!), fromBox, fromLines);
-	addConnectionList(sidebar, 'To ' + hiddenPrefix(selected.to) + endName(selected.to), groupInside(toBox, toCounts, info!), toBox);
+	addConnectionList(sidebar, 'From', groupInside(fromBox, fromCounts, info!), {
+		name: hiddenPrefix(selected.from) + endName(selected.from),
+		hint: 'Where the arrow starts: the files doing the importing',
+		relativeTo: fromBox,
+		lines: fromLines,
+	});
+	addConnectionList(sidebar, 'To', groupInside(toBox, toCounts, info!), {
+		name: hiddenPrefix(selected.to) + endName(selected.to),
+		hint: 'What the arrow points at: the files being imported',
+		relativeTo: toBox,
+	});
 	sidebar.classList.add('visible');
 }
 
@@ -927,36 +944,62 @@ function pathWithBreaks(path: string): DocumentFragment {
 	return fragment;
 }
 
-// where a sidebar row's open button goes: a file, and the lines to select in it
-interface OpenAt {
+// one place an import is written: the file, its lines, and how its row reads
+interface ImportLine {
 	path: string;
 	lines: LineRange;
+	label: string; // the other file in the import, by its path from the box
+}
+
+/**
+ * Writes a node's path from a box it's inside, so it's short: "v1/events.js" from app/api. The box itself is just its
+ * name.
+ * @param boxId The box.
+ * @param id The node, inside the box or the box itself.
+ * @returns The path from the box.
+ */
+function pathFrom(boxId: string, id: string): string {
+	if (id.startsWith(boxId + '/')) {
+		return id.slice(boxId.length + 1);
+	}
+	return info!.nodesById.get(id)!.name;
+}
+
+// the optional parts of a list in the sidebar
+interface ListOptions {
+	name?: string; // a box's name after the title, kept in its own case
+	hint?: string; // what the list means, shown on hovering its title
+	relativeTo?: string; // a box whose rows these are inside, so top rows show their path from it
+	lines?: Map<string, ImportLine[]>; // the places each file row's import is written, listed under it when opened
+}
+
+/**
+ * Adds a place an import is written to a row's list of them.
+ * @param byRow Each row's places, by the row's id.
+ * @param rowId The row.
+ * @param line The place.
+ */
+function addImportLine(byRow: Map<string, ImportLine[]>, rowId: string, line: ImportLine): void {
+	const known = byRow.get(rowId);
+	if (known !== undefined) {
+		known.push(line);
+	} else {
+		byRow.set(rowId, [line]);
+	}
 }
 
 /**
  * Makes a button that opens a file in the editor, or shows a directory in the Explorer.
  * @param path The node's repo-relative path.
  * @param kind The node's kind, which decides what opening means.
- * @param openAt A file and lines to open instead, like an import line, which may be in another file; left out, the
- *   node opens, at the top for a file.
  * @returns The button.
  */
-function makeOpenButton(path: string, kind: NodeKind, openAt?: OpenAt): HTMLButtonElement {
+function makeOpenButton(path: string, kind: NodeKind): HTMLButtonElement {
 	const button = document.createElement('button');
 	button.className = 'icon-button';
 	button.title = kind === 'file' ? 'Open in editor' : 'Show in Explorer';
 	button.dataset.path = path;
 	button.dataset.kind = kind;
-	if (openAt !== undefined) {
-		const lines = openAt.lines;
-		const fileName = openAt.path.slice(openAt.path.lastIndexOf('/') + 1);
-		const where = lines.start === lines.end ? 'line ' + lines.start : 'lines ' + lines.start + '–' + lines.end;
-		button.title = 'Open ' + fileName + ' at ' + where;
-		button.dataset.path = openAt.path;
-		button.dataset.kind = 'file';
-		button.dataset.lineStart = String(lines.start);
-		button.dataset.lineEnd = String(lines.end);
-	}
 	button.appendChild(makeOpenIcon());
 	button.addEventListener('click', handleOpenClick);
 	return button;
@@ -971,11 +1014,7 @@ function handleOpenClick(event: MouseEvent): void {
 	event.stopPropagation();
 
 	const button = event.currentTarget as HTMLElement;
-	let lines: LineRange | undefined = undefined;
-	if (button.dataset.lineStart !== undefined) {
-		lines = { start: Number(button.dataset.lineStart), end: Number(button.dataset.lineEnd) };
-	}
-	vscode.postMessage({ type: 'open', path: button.dataset.path!, kind: button.dataset.kind as NodeKind, lines: lines });
+	vscode.postMessage({ type: 'open', path: button.dataset.path!, kind: button.dataset.kind as NodeKind });
 }
 
 // which rows in the sidebar's lists are open, as the list's title and the row's id; forgotten when the selection changes
@@ -990,15 +1029,24 @@ let openLinkRowsFor: string | undefined = undefined;
  * @param sidebar The sidebar element.
  * @param title The section title.
  * @param groups The rows, from groupLinks or groupInside.
- * @param relativeTo A box whose rows these are inside, so top rows show their path from it; leave it out for full
- *   paths.
- * @param lines Where some rows' open buttons go instead, by row id, like an import line; rows left out open their own
- *   node.
+ * @param options A box name for the title, a hint for it, a box to show paths from, and import lines; all optional.
  */
-function addConnectionList(sidebar: HTMLElement, title: string, groups: LinkGroup[], relativeTo?: string, lines?: Map<string, OpenAt>): void {
+function addConnectionList(sidebar: HTMLElement, title: string, groups: LinkGroup[], options: ListOptions = {}): void {
+	const relativeTo = options.relativeTo;
+	const lines = options.lines;
+
 	const heading = document.createElement('div');
 	heading.className = 'sidebar-section';
 	heading.textContent = title;
+	if (options.name !== undefined) {
+		const name = document.createElement('span');
+		name.className = 'sidebar-section-name';
+		name.textContent = ' ' + options.name;
+		heading.appendChild(name);
+	}
+	if (options.hint !== undefined) {
+		heading.title = options.hint;
+	}
 	sidebar.appendChild(heading);
 
 	if (groups.length === 0) {
@@ -1019,11 +1067,16 @@ function addConnectionList(sidebar: HTMLElement, title: string, groups: LinkGrou
 	}
 	function addRows(rows: LinkGroup[], level: number): void {
 		for (const row of rows) {
-			const key = title + '\n' + row.id;
+			const key = title + ' ' + (options.name ?? '') + '\n' + row.id;
 			const text = level === 0 ? topRowText(row.id) : info!.nodesById.get(row.id)!.name;
-			sidebar.appendChild(makeLinkRow(row, text, level, key, lines?.get(row.id)));
+			const rowLines = lines?.get(row.id) ?? [];
+			const canOpen = row.children.length > 0 || rowLines.length > 0;
+			sidebar.appendChild(makeLinkRow(row, text, level, key, canOpen));
 			if (openLinkRows.has(key)) {
 				addRows(row.children, level + 1);
+				for (const line of rowLines) {
+					sidebar.appendChild(makeImportLineRow(line, level + 1));
+				}
 			}
 		}
 	}
@@ -1037,10 +1090,10 @@ function addConnectionList(sidebar: HTMLElement, title: string, groups: LinkGrou
  * @param text What the row says.
  * @param level How deep it sits in the list, for its indent.
  * @param key Which row it is, for remembering whether it's open.
- * @param openAt Where its open button goes instead, like an import line; left out, it opens the row's node.
+ * @param canOpen Whether it has anything under it to open: rows inside it, or places its import is written.
  * @returns The row.
  */
-function makeLinkRow(row: LinkGroup, text: string, level: number, key: string, openAt?: OpenAt): HTMLElement {
+function makeLinkRow(row: LinkGroup, text: string, level: number, key: string, canOpen: boolean): HTMLElement {
 	const link = document.createElement('div');
 	link.className = 'sidebar-link';
 	link.style.paddingLeft = (level * 16) + 'px';
@@ -1051,8 +1104,12 @@ function makeLinkRow(row: LinkGroup, text: string, level: number, key: string, o
 	// an empty spot for rows with nothing inside, so names line up
 	const toggle = document.createElement('span');
 	toggle.className = 'sidebar-toggle';
-	if (row.children.length > 0) {
+	if (canOpen) {
 		toggle.textContent = openLinkRows.has(key) ? '▾' : '▸';
+		// a file row opens to its import lines; a folder row to what's inside it
+		if (row.children.length === 0) {
+			toggle.title = 'See lines imported';
+		}
 		function flip(event: MouseEvent): void {
 			event.stopPropagation();
 			if (openLinkRows.has(key)) {
@@ -1078,9 +1135,38 @@ function makeLinkRow(row: LinkGroup, text: string, level: number, key: string, o
 	link.appendChild(count);
 
 	const node = info!.nodesById.get(row.id)!;
-	link.appendChild(makeOpenButton(node.path, node.kind, openAt));
+	link.appendChild(makeOpenButton(node.path, node.kind));
 
 	return link;
+}
+
+/**
+ * Makes a row for one place an import is written. Clicking it opens that file with the line selected.
+ * @param line Where the import is.
+ * @param level How deep it sits in the list, for its indent.
+ * @returns The row.
+ */
+function makeImportLineRow(line: ImportLine, level: number): HTMLElement {
+	const row = document.createElement('div');
+	row.className = 'sidebar-link sidebar-line';
+	row.style.paddingLeft = (level * 16) + 'px';
+	row.title = 'Open ' + line.path + ' at line ' + line.lines.start;
+
+	// an empty spot where a toggle would be, so it lines up with the rows above
+	const toggle = document.createElement('span');
+	toggle.className = 'sidebar-toggle';
+	row.appendChild(toggle);
+
+	const text = document.createElement('span');
+	text.className = 'sidebar-link-text';
+	text.textContent = line.label;
+	row.appendChild(text);
+
+	function open(): void {
+		vscode.postMessage({ type: 'open', path: line.path, kind: 'file', lines: line.lines });
+	}
+	row.addEventListener('click', open);
+	return row;
 }
 
 /**

@@ -1161,6 +1161,10 @@ function buildHtml(scriptUri: vscode.Uri): string {
 			color: var(--vscode-descriptionForeground);
 			font-size: 11px;
 		}
+		/* a place an import is written, under its file: dimmer, so it reads as detail */
+		.sidebar-line {
+			color: var(--vscode-descriptionForeground);
+		}
 		/* "hidden in", before an arrow end that's a strip: dim, like a note */
 		.sidebar-hidden {
 			color: var(--vscode-descriptionForeground);
@@ -1174,6 +1178,10 @@ function buildHtml(scriptUri: vscode.Uri): string {
 			font-size: 11px;
 			text-transform: uppercase;
 			color: var(--vscode-descriptionForeground);
+		}
+		/* a box's name in a list's title, in its own case, so it reads as a name */
+		.sidebar-section-name {
+			text-transform: none;
 		}
 		.label {
 			overflow: hidden;
