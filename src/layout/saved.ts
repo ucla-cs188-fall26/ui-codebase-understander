@@ -1,6 +1,6 @@
 import { Camera } from './camera';
 import { Position, Size } from './geometry';
-import { createLayoutState, GraphInfo, LayoutState, Page, PageCell } from './state';
+import { createLayoutState, GraphInfo, LayoutState, Page, PageCell, Pushes } from './state';
 
 // how strongly arrows draw, from the toolbar: only the selected box's, the rest faint, or everything in full
 export type ArrowMode = 'hidden' | 'default' | 'full';
@@ -14,6 +14,8 @@ export interface SavedLayout {
 	jumpOpened?: string[]; // missing from layouts saved before jumps closed what they opened
 	closedSizes: [string, Size][];
 	openSizes: [string, Size][];
+	pushes?: [string, Pushes][]; // missing from layouts saved before boxes remembered their pushes
+	owed?: [string, Position][]; // the same
 	camera: Camera;
 	arrowMode?: ArrowMode; // missing from layouts saved before the setting existed
 	arrowDepth?: number; // the same; how many levels below the folder an arrow lives in its ends may go
@@ -36,6 +38,8 @@ export function toSaved(state: LayoutState, camera: Camera, arrowMode: ArrowMode
 		jumpOpened: Array.from(state.jumpOpened),
 		closedSizes: Array.from(state.closedSizes.entries()),
 		openSizes: Array.from(state.openSizes.entries()),
+		pushes: Array.from(state.pushes.entries()),
+		owed: Array.from(state.owed.entries()),
 		camera: camera,
 		arrowMode: arrowMode,
 		arrowDepth: arrowDepth,
@@ -78,6 +82,7 @@ export function fromSaved(saved: SavedLayout, info: GraphInfo): { state: LayoutS
 				size: page.size,
 				natural: page.natural ?? page.size,
 				drawnFrom: page.drawnFrom ?? gridCorner,
+				origins: page.origins ?? {},
 			});
 		}
 	}
@@ -99,6 +104,18 @@ export function fromSaved(saved: SavedLayout, info: GraphInfo): { state: LayoutS
 	for (const [id, size] of saved.openSizes) {
 		if (info.nodesById.has(id)) {
 			state.openSizes.set(id, size);
+		}
+	}
+
+	// a box with no pushes saved makes room the usual way the next time it changes size
+	for (const [id, pushes] of saved.pushes ?? []) {
+		if (info.nodesById.has(id)) {
+			state.pushes.set(id, pushes);
+		}
+	}
+	for (const [id, owed] of saved.owed ?? []) {
+		if (info.nodesById.has(id)) {
+			state.owed.set(id, owed);
 		}
 	}
 

@@ -157,7 +157,7 @@ function latestInFlow(ids: string[], rects: Map<string, Rect>): string {
  * @param rects The children as arranged, relative to the inside of the directory.
  * @param width The room inside the directory, from its left edge to its right wall.
  * @returns The shown children's new rects, the hidden ones in flow order, and whether everything fit. It doesn't when
- *   the width is below minSquishWidth, which resizing never allows.
+ *   the width is below minSquishWidth.
  */
 export function squishHorizontally(rects: Map<string, Rect>, width: number): { rects: Map<string, Rect>; hidden: string[]; fits: boolean } {
 	const placed = new Map<string, Rect>();
@@ -236,6 +236,30 @@ export function minSquishWidth(rects: Map<string, Rect>): number {
 }
 
 /**
+ * Finds the narrowest a directory's inside can get with nothing hidden: each row's boxes as wide as they cover, with the
+ * space before the first gone and the gaps between them down to MIN_GAP (or less, if they started closer).
+ * @param rects The children as arranged.
+ * @returns The smallest width every row still fits in, from the inside's left edge.
+ */
+export function tightWidth(rects: Map<string, Rect>): number {
+	let widest = 0;
+	for (const row of rowsOf(rects)) {
+		const stretches = stretchesOf(row, rects);
+		let width = 0;
+		let end = 0;
+		for (let i = 0; i < stretches.length; i++) {
+			if (i > 0) {
+				width += Math.min(stretches[i].start - end, MIN_GAP);
+			}
+			width += stretches[i].end - stretches[i].start;
+			end = stretches[i].end;
+		}
+		widest = Math.max(widest, width);
+	}
+	return widest;
+}
+
+/**
  * Swaps each box's across and down, so columns become rows. The horizontal functions then handle the bottom wall too.
  * @param rects The boxes.
  * @returns New rects with x and y, and width and height, swapped. Doing it twice gives back the original.
@@ -258,6 +282,15 @@ function transpose(rects: Map<string, Rect>): Map<string, Rect> {
 export function squishVertically(rects: Map<string, Rect>, height: number): { rects: Map<string, Rect>; hidden: string[]; fits: boolean } {
 	const squished = squishHorizontally(transpose(rects), height);
 	return { rects: transpose(squished.rects), hidden: squished.hidden, fits: squished.fits };
+}
+
+/**
+ * Finds the shortest a directory's inside can get with nothing hidden, the way tightWidth does across.
+ * @param rects The children as arranged.
+ * @returns The smallest height every column still fits in, from the inside's top edge.
+ */
+export function tightHeight(rects: Map<string, Rect>): number {
+	return tightWidth(transpose(rects));
 }
 
 /**

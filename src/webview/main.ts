@@ -5,7 +5,7 @@ import { getLineage } from '../analysis/lookups';
 import { Arrow, arrowBounds, arrowHead, arrowPath, arrowWidth, placeArrows } from '../layout/arrows';
 import { Camera, fitCamera, zoomAt } from '../layout/camera';
 import { boundsOf, Position, Rect, Size, subtractRect } from '../layout/geometry';
-import { arrangeShown, boxSize, buildGraphInfo, closeNode, copyLayoutState, createLayoutState, fitPagesToSizes, listPages, GraphInfo, layOutChildren, LayoutState, openNode, resetNode, resizeTo, StripSide, turnPage, PageListing, showNode, turnToPage } from '../layout/state';
+import { arrangeShown, boxSize, buildGraphInfo, closeNode, copyLayoutState, createLayoutState, holdPages, listPages, GraphInfo, layOutChildren, LayoutState, openNode, resetNode, resizeTo, StripSide, turnPage, PageListing, showNode, turnToPage } from '../layout/state';
 import { ArrowMode, fromSaved, toSaved } from '../layout/saved';
 import { dragTo, dropAt } from '../layout/drop';
 import { applyStyle } from './style';
@@ -2125,9 +2125,9 @@ function handleMessage(event: MessageEvent<ExtensionToWebview>): void {
 			layOutChildren(state, info, id);
 		}
 
-		// a page too big for the size its box was given moves its extra boxes to the next page, instead of squishing
-		// them off
-		fitPagesToSizes(state, info);
+		// a page too big for the size its box was given gets room, instead of squishing boxes off it; held room isn't
+		// saved, so it's worked out again here
+		holdPages(state, info);
 
 		applyCamera();
 		drawGraph();

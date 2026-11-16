@@ -9,7 +9,7 @@ import { defaultLayout, GAP } from '../layout/defaultLayout';
 import { arrowHead, arrowPath, arrowPulls, arrowWidth, chooseSides, placeArrows } from '../layout/arrows';
 import { fitCamera, MAX_SCALE, zoomAt } from '../layout/camera';
 import { boundsOf, overlapsWithGap, subtractRect } from '../layout/geometry';
-import { arrangeChildren, arrangeShown, boxSize, changeSize, buildGraphInfo, CHILD_LIMIT, childOrigin, closeNode, copyLayoutState, createLayoutState, defaultSize, GraphInfo, LayoutState, moveTo, openNode, PADDING, hiddenSides, listPages, resetNode, resizeTo, showNode, turnPage, turnToPage } from '../layout/state';
+import { arrangeChildren, arrangeShown, boxSize, changeSize, buildGraphInfo, CHILD_LIMIT, childOrigin, closeNode, copyLayoutState, createLayoutState, defaultSize, GraphInfo, LayoutState, HEADER, moveTo, openNode, PADDING, hiddenSides, listPages, resetNode, resizeTo, showNode, STRIP_THICKNESS, turnPage, turnToPage } from '../layout/state';
 import { arrowTouches, arrowZIndex, boxesUnderArrow, boxZIndexes, groupInside, groupLinks, placeBoxes, placeStrips, stripId, visibleEdges } from '../layout/place';
 import { fromSaved, toSaved } from '../layout/saved';
 import { dragTo, dropAt, settleDrop } from '../layout/drop';
@@ -865,6 +865,84 @@ suite('making room when a box changes size', () => {
 		const rects = arrangeChildren(state, info, ROOT_ID);
 		assert.ok(!overlapsWithGap(rects.get('b.ts')!, rects.get('c.ts')!, 0));
 	});
+
+	// every child of p's home, to compare before and after
+	function homesIn(state: LayoutState, info: GraphInfo) {
+		const homes = new Map<string, { x: number; y: number }>();
+		for (const id of info.childrenById.get('p')!) {
+			homes.set(id, state.homes.get(id)!);
+		}
+		return homes;
+	}
+
+	// a's size 500 wider and 300 taller than its default: big enough that d, off diagonally, is both beside and below it
+	function hugeSize(info: GraphInfo) {
+		const original = defaultSize(info, 'p/a');
+		return { width: original.width + 500, height: original.height + 300 };
+	}
+
+	test('shrinking back takes back exactly what growing pushed, even a box pushed both right and down', () => {
+		const { info, state } = makeBlock();
+		const before = homesIn(state, info);
+
+		resizeTo(state, info, 'p/a', hugeSize(info));
+		assert.deepStrictEqual(state.homes.get('p/d.ts'), { x: 900, y: 500 });
+		resizeTo(state, info, 'p/a', defaultSize(info, 'p/a'));
+
+		assert.deepStrictEqual(homesIn(state, info), before);
+	});
+
+	test('growing two boxes and shrinking them back in the same order puts everything back', () => {
+		const { info, state } = makeBlock();
+		const before = homesIn(state, info);
+		const cSize = defaultSize(info, 'p/c.ts');
+
+		resizeTo(state, info, 'p/a', hugeSize(info));
+		resizeTo(state, info, 'p/c.ts', { width: cSize.width + 300, height: cSize.height + 200 });
+		resizeTo(state, info, 'p/a', defaultSize(info, 'p/a'));
+		resizeTo(state, info, 'p/c.ts', cSize);
+
+		assert.deepStrictEqual(homesIn(state, info), before);
+	});
+
+	test('a box the user moves after it was pushed stays where they put it when the pusher shrinks', () => {
+		const { info, state } = makeBlock();
+		resizeTo(state, info, 'p/a', grownSize(info));
+
+		moveTo(state, info, 'p/b.ts', { x: 700, y: 600 });
+		resizeTo(state, info, 'p/a', defaultSize(info, 'p/a'));
+
+		assert.deepStrictEqual(state.homes.get('p/b.ts'), { x: 700, y: 600 });
+		assert.deepStrictEqual(state.homes.get('p/c.ts'), { x: 0, y: 200 });
+	});
+
+	test('a box pushed both ways brings along one it would land on, and takes it back too', () => {
+		const { info, state } = makeBlock();
+
+		// e is in neither of a's paths, but d, pushed right and down, would land on it
+		state.homes.set('p/e.ts', { x: 850, y: 520 });
+		const nodes = buildTree('repo', ['p/a/x.ts', 'p/b.ts', 'p/c.ts', 'p/d.ts', 'p/e.ts']);
+		const withE = buildGraphInfo({ nodes: nodes, edges: [] });
+		const before = homesIn(state, withE);
+
+		resizeTo(state, withE, 'p/a', hugeSize(withE));
+		assert.deepStrictEqual(state.homes.get('p/e.ts'), { x: 1350, y: 820 });
+		resizeTo(state, withE, 'p/a', defaultSize(withE, 'p/a'));
+
+		assert.deepStrictEqual(homesIn(state, withE), before);
+	});
+
+	test('what a box pushed is still taken back after saving and loading', () => {
+		const { info, state } = makeBlock();
+		const before = homesIn(state, info);
+		resizeTo(state, info, 'p/a', hugeSize(info));
+
+		const text = JSON.stringify(toSaved(state, { x: 0, y: 0, scale: 1 }, 'default', 1));
+		const restored = fromSaved(JSON.parse(text), info).state;
+		resizeTo(restored, info, 'p/a', defaultSize(info, 'p/a'));
+
+		assert.deepStrictEqual(homesIn(restored, info), before);
+	});
 });
 
 suite('placing boxes', () => {
@@ -969,6 +1047,19 @@ suite('settleDrop', () => {
 
 		// a's center is right of b's, so b moves left until its right edge is GAP before a's left edge at 240
 		assert.deepStrictEqual(state.homes.get('b.ts'), { x: 240 - GAP - 100, y: 0 });
+	});
+
+	test('a pushed box passes its push on the same way, so nothing ends up back under the dropped box', () => {
+		// a tall box dropped over b and c pushes both down; b, now level with c and taller, must push c further down,
+		// not back up under a
+		const { info, state } = makeBoxes([['a.ts', { x: 0, y: 0 }], ['b.ts', { x: 0, y: 240 }], ['c.ts', { x: 0, y: 270 }]]);
+		state.closedSizes.set('a.ts', { width: 100, height: 300 });
+		state.closedSizes.set('b.ts', { width: 100, height: 80 });
+
+		settleDrop(state, info, 'a.ts');
+
+		assert.deepStrictEqual(state.homes.get('b.ts'), { x: 0, y: 300 + GAP });
+		assert.deepStrictEqual(state.homes.get('c.ts'), { x: 0, y: 300 + GAP + 80 + GAP });
 	});
 
 	test('pushes right or down instead when away would pass a directory\'s left edge', () => {
@@ -1104,16 +1195,22 @@ suite('resizeTo', () => {
 		resizeTo(state, info, 'src/a.ts', { width: 300, height: 90 });
 		assert.deepStrictEqual(state.closedSizes.get('src/a.ts'), { width: 300, height: 90 });
 
-		// an open box stops where its rows and columns are packed tight with at least 3 boxes each, plus its padding
-		// and title; childOrigin's x is the padding
+		// an open box stops at room for its biggest child and only the strips its pages need, plus its padding and
+		// title: a imports lib, so they go on two pages side by side, each with one strip across and none down
 		openNode(state, info, 'src');
 		resizeTo(state, info, 'src', { width: 10, height: 10 });
-		const children = arrangeChildren(state, info, 'src');
-		const origin = childOrigin(state, info, 'src');
+		let widest = 0;
+		let tallest = 0;
+		for (const id of info.childrenById.get('src')!) {
+			widest = Math.max(widest, boxSize(state, info, id).width);
+			tallest = Math.max(tallest, boxSize(state, info, id).height);
+		}
+		const stripRoom = STRIP_THICKNESS + PADDING;
 		assert.deepStrictEqual(state.openSizes.get('src'), {
-			width: origin.x + minSquishWidth(children) + PADDING,
-			height: origin.y + minSquishHeight(children) + PADDING,
+			width: PADDING + widest + stripRoom + PADDING,
+			height: HEADER + PADDING + tallest + PADDING,
 		});
+		assert.deepStrictEqual(hiddenSides(state, info, 'src').right, ['src/lib']);
 		assert.ok(!state.closedSizes.has('src'));
 	});
 });
@@ -1147,13 +1244,13 @@ suite('arrangeShown', () => {
 		const { info, state } = makeSeven();
 		const fits = boxSize(state, info, 'p');
 
-		// the five shown files stack in one column, so shrinking from below hides the lowest ones, down to 3;
-		// they join the two that were past the limit
+		// the five shown files stack in one column, so shrinking from below moves the lowest ones to later pages, down
+		// to one; they join the two that were past the limit
 		resizeTo(state, info, 'p', { width: fits.width, height: 0 });
 		const shown = arrangeShown(state, info, 'p');
 
-		assert.strictEqual(shown.rects.size, 3);
-		assert.strictEqual(shown.hiddenBottom.length, 4);
+		assert.strictEqual(shown.rects.size, 1);
+		assert.strictEqual(shown.hiddenBottom.length, 6);
 	});
 });
 
@@ -1465,9 +1562,46 @@ suite('resizing pages', () => {
 		resizeTo(state, info, 'p', { width: fits.width, height: 0 });
 		const shown = arrangeShown(state, info, 'p');
 
-		assert.strictEqual(shown.rects.size, 3);
-		assert.strictEqual(shown.hiddenBottom.length, 4);
+		assert.strictEqual(shown.rects.size, 1);
+		assert.strictEqual(shown.hiddenBottom.length, 6);
 		assert.deepStrictEqual(shown.hiddenBottom.toSorted(), hiddenSides(state, info, 'p').bottom.toSorted());
+	});
+
+	test('a box moved on a page stays where it was put after turning away and back', () => {
+		const { info, state } = makeFolder();
+
+		// small enough that the first page holds only f11, which is then dragged right and down
+		resizeTo(state, info, 'p', { width: 400, height: 0 });
+		dropAt(state, info, 'p/f11.ts', { x: 150, y: 20 });
+
+		turnPage(state, info, 'p', 'bottom');
+		turnPage(state, info, 'p', 'top');
+
+		const rect = arrangeShown(state, info, 'p').rects.get('p/f11.ts')!;
+		assert.deepStrictEqual({ x: rect.x, y: rect.y }, { x: 150, y: 20 });
+	});
+
+	test('a box moved on a page stays where it was put when the directory is resized', () => {
+		const { info, state } = makeFolder();
+		resizeTo(state, info, 'p', { width: 400, height: 0 });
+		dropAt(state, info, 'p/f11.ts', { x: 150, y: 20 });
+
+		const size = boxSize(state, info, 'p');
+		resizeTo(state, info, 'p', { width: size.width + 5, height: size.height });
+
+		const rect = arrangeShown(state, info, 'p').rects.get('p/f11.ts')!;
+		assert.deepStrictEqual({ x: rect.x, y: rect.y }, { x: 150, y: 20 });
+	});
+
+	test('a directory can be resized back to exactly the size it opened at', () => {
+		const { info, state } = makeFolder();
+		const opened = boxSize(state, info, 'p');
+
+		resizeTo(state, info, 'p', { width: opened.width + 200, height: opened.height + 200 });
+		resizeTo(state, info, 'p', opened);
+
+		// its pages only ever have a strip below, so the minimum keeps no room beside it
+		assert.deepStrictEqual(boxSize(state, info, 'p'), opened);
 	});
 
 	test('growing back undoes shrinking exactly', () => {
@@ -1495,6 +1629,182 @@ suite('resizing pages', () => {
 		assert.ok(shown.rects.has('p/f16.ts') && shown.rects.has('p/f17.ts'));
 		assert.ok(!shown.rects.has('p/f11.ts'));
 		assert.strictEqual(shown.rects.get('p/f16.ts')!.y, 0);
+	});
+
+	// checks every child a directory shows is inside its padding and clear of its strips; sizes that grew by adding
+	// and taking away can be a tiny rounding error off, so the inside is that much bigger
+	function assertShownFit(state: LayoutState, info: GraphInfo, id: string): void {
+		const rects = placeBoxes(state, info, { x: 0, y: 0 });
+		const box = rects.get(id)!;
+		const rounding = 0.001;
+		const inside = { x: box.x + PADDING - rounding, y: box.y + HEADER + PADDING - rounding, width: box.width - 2 * PADDING + 2 * rounding, height: box.height - HEADER - 2 * PADDING + 2 * rounding };
+		const strips = placeStrips(state, info, rects).filter(function isOwn(strip) {
+			return strip.ownerId === id;
+		});
+		for (const childId of arrangeShown(state, info, id).rects.keys()) {
+			const rect = rects.get(childId)!;
+			assert.ok(rect.x >= inside.x && rect.x + rect.width <= inside.x + inside.width, childId + ' sticks out sideways');
+			assert.ok(rect.y >= inside.y && rect.y + rect.height <= inside.y + inside.height, childId + ' sticks out up or down');
+			for (const strip of strips) {
+				assert.ok(!overlapsWithGap(rect, strip.rect, 0), childId + ' is under the ' + strip.side + ' strip');
+			}
+		}
+	}
+
+	// a chain of files through a directory; the last file is imported twice, so it sits a little higher than the rest,
+	// and none of the first four start at the very top
+	function makeChain() {
+		const paths = ['p/a.ts', 'p/b.ts', 'p/c.ts', 'p/d/x.ts', 'p/e.ts'];
+		const edges: Edge[] = [
+			{ from: 'p/a.ts', to: 'p/b.ts', kind: 'import', lines: { start: 1, end: 1 } },
+			{ from: 'p/b.ts', to: 'p/c.ts', kind: 'import', lines: { start: 1, end: 1 } },
+			{ from: 'p/c.ts', to: 'p/d/x.ts', kind: 'import', lines: { start: 1, end: 1 } },
+			{ from: 'p/d/x.ts', to: 'p/e.ts', kind: 'import', lines: { start: 1, end: 1 } },
+			{ from: 'p/a.ts', to: 'p/e.ts', kind: 'import', lines: { start: 1, end: 1 } },
+		];
+		const info = buildGraphInfo({ nodes: buildTree('repo', paths), edges: edges });
+		const state = createLayoutState();
+		openNode(state, info, ROOT_ID);
+		openNode(state, info, 'p');
+		return { info: info, state: state };
+	}
+
+	test('at any size, every page has children and fits the box, and turning to it keeps the size', () => {
+		for (const make of [makeFolder, makeChain]) {
+			for (const width of [0, 300, 500, 750, 1200]) {
+				for (const height of [0, 150, 250, 400]) {
+					const { info, state } = make();
+					resizeTo(state, info, 'p', { width: width, height: height });
+					const size = boxSize(state, info, 'p');
+
+					for (const page of listPages(state, info, 'p')) {
+						turnToPage(state, info, 'p', page.cell);
+						assert.ok(arrangeShown(state, info, 'p').rects.size > 0, 'an empty page at ' + width + 'x' + height);
+						assertShownFit(state, info, 'p');
+						assert.deepStrictEqual(boxSize(state, info, 'p'), size);
+					}
+				}
+			}
+		}
+	});
+
+	// a directory with files around a directory of four files, which is much bigger open than closed
+	function makeAroundDirectory() {
+		const paths = ['p/a.ts', 'p/b.ts', 'p/c.ts', 'p/d/x.ts', 'p/d/y.ts', 'p/d/z.ts', 'p/d/w.ts', 'p/e.ts'];
+		const edges: Edge[] = [
+			{ from: 'p/a.ts', to: 'p/b.ts', kind: 'import', lines: { start: 1, end: 1 } },
+			{ from: 'p/b.ts', to: 'p/d/x.ts', kind: 'import', lines: { start: 1, end: 1 } },
+			{ from: 'p/a.ts', to: 'p/c.ts', kind: 'import', lines: { start: 1, end: 1 } },
+			{ from: 'p/c.ts', to: 'p/e.ts', kind: 'import', lines: { start: 1, end: 1 } },
+			{ from: 'p/d/x.ts', to: 'p/d/y.ts', kind: 'import', lines: { start: 1, end: 1 } },
+		];
+		const info = buildGraphInfo({ nodes: buildTree('repo', paths), edges: edges });
+		const state = createLayoutState();
+		openNode(state, info, ROOT_ID);
+		openNode(state, info, 'p');
+		return { info: info, state: state };
+	}
+
+	test('opening a directory inside a resized one grows it by as much, and closing gives the room back', () => {
+		const { info, state } = makeAroundDirectory();
+		resizeTo(state, info, 'p', boxSize(state, info, 'p'));
+		const before = boxSize(state, info, 'p');
+		const closed = boxSize(state, info, 'p/d');
+
+		openNode(state, info, 'p/d');
+		const opened = boxSize(state, info, 'p/d');
+		assert.ok(Math.abs(boxSize(state, info, 'p').width - (before.width + opened.width - closed.width)) < 0.001);
+		assertShownFit(state, info, 'p');
+
+		closeNode(state, info, 'p/d');
+		assert.ok(Math.abs(boxSize(state, info, 'p').width - before.width) < 0.001);
+		assert.ok(Math.abs(boxSize(state, info, 'p').height - before.height) < 0.001);
+	});
+
+	test('opening a directory inside one squished by its corner never moves its siblings to another page', () => {
+		const { info, state } = makeAroundDirectory();
+		const fits = boxSize(state, info, 'p');
+		resizeTo(state, info, 'p', { width: fits.width - 60, height: fits.height - 30 });
+		const shown = Array.from(arrangeShown(state, info, 'p').rects.keys()).toSorted();
+
+		openNode(state, info, 'p/d');
+
+		assert.deepStrictEqual(Array.from(arrangeShown(state, info, 'p').rects.keys()).toSorted(), shown);
+		assertShownFit(state, info, 'p');
+	});
+
+	test('a box dropped onto a spot with a box on another page pushes that one too, so the two never share a page on top of each other', () => {
+		const { info, state } = makeFolder();
+
+		// f16 is on the second page, below the first five; drop f11 right where it is
+		const hidden = state.homes.get('p/f16.ts')!;
+		dropAt(state, info, 'p/f11.ts', hidden);
+
+		const f11 = { x: hidden.x, y: hidden.y, width: boxSize(state, info, 'p/f11.ts').width, height: boxSize(state, info, 'p/f11.ts').height };
+		const f16Home = state.homes.get('p/f16.ts')!;
+		const f16 = { x: f16Home.x, y: f16Home.y, width: boxSize(state, info, 'p/f16.ts').width, height: boxSize(state, info, 'p/f16.ts').height };
+		assert.ok(!overlapsWithGap(f11, f16, 0));
+	});
+
+	test('a box on another page shrinking keeps the shown page\'s boxes inside the directory', () => {
+		const { info, state } = makeFolder();
+		turnPage(state, info, 'p', 'bottom');
+
+		// f11, on the first page, gets shorter, which pulls everything below it up, past where the second page started
+		const f11 = boxSize(state, info, 'p/f11.ts');
+		resizeTo(state, info, 'p/f11.ts', { width: f11.width, height: f11.height - 10 });
+
+		assertShownFit(state, info, 'p');
+	});
+
+	test('resizing never puts children behind a top or left strip the user didn\'t turn to', () => {
+		const { info, state } = makeChain();
+
+		// the last file starts a little higher than the rest; cutting from where the first page starts would put the
+		// others on a page above it
+		resizeTo(state, info, 'p', { width: 0, height: 1000 });
+		resizeTo(state, info, 'p', { width: 750, height: 0 });
+
+		const hidden = hiddenSides(state, info, 'p');
+		assert.deepStrictEqual(hidden.top, []);
+		assert.deepStrictEqual(hidden.left, []);
+	});
+
+	test('at its smallest, a box in a row of pages is only as tall as its tallest child, with no room for strips it won\'t have', () => {
+		// a chain of files in a row, so pages go across and none has a strip above or below
+		const paths = ['p/a.ts', 'p/b.ts', 'p/c.ts', 'p/d.ts'];
+		const edges: Edge[] = [
+			{ from: 'p/a.ts', to: 'p/b.ts', kind: 'import', lines: { start: 1, end: 1 } },
+			{ from: 'p/b.ts', to: 'p/c.ts', kind: 'import', lines: { start: 1, end: 1 } },
+			{ from: 'p/c.ts', to: 'p/d.ts', kind: 'import', lines: { start: 1, end: 1 } },
+		];
+		const info = buildGraphInfo({ nodes: buildTree('repo', paths), edges: edges });
+		const state = createLayoutState();
+		openNode(state, info, ROOT_ID);
+		openNode(state, info, 'p');
+
+		resizeTo(state, info, 'p', { width: 0, height: 0 });
+
+		let tallest = 0;
+		for (const id of paths) {
+			tallest = Math.max(tallest, boxSize(state, info, id).height);
+		}
+		assert.strictEqual(boxSize(state, info, 'p').height, HEADER + PADDING + tallest + PADDING);
+		for (const page of listPages(state, info, 'p')) {
+			turnToPage(state, info, 'p', page.cell);
+			assertShownFit(state, info, 'p');
+		}
+	});
+
+	test('a page never comes out empty, even when no child starts at the top of the box', () => {
+		const { info, state } = makeChain();
+
+		// narrow, then wide enough to take in the directory but not the last file, and too short for the directory
+		resizeTo(state, info, 'p', { width: 0, height: 1000 });
+		resizeTo(state, info, 'p', { width: 750, height: 0 });
+
+		assert.ok(arrangeShown(state, info, 'p').rects.size > 0);
+		assertShownFit(state, info, 'p');
 	});
 });
 
@@ -1893,8 +2203,8 @@ suite('placeStrips', () => {
 			return strip.side === 'bottom';
 		})!;
 
-		// the two past the limit, which would be below anyway, plus the two the squish hid
-		assert.strictEqual(bottom.hiddenIds.length, 4);
+		// the two past the limit, which would be below anyway, plus the four that no longer fit
+		assert.strictEqual(bottom.hiddenIds.length, 6);
 		const box = rects.get('p')!;
 		const padding = PADDING;
 		assert.strictEqual(bottom.rect.y + bottom.rect.height, box.y + box.height - padding);

@@ -1,6 +1,6 @@
 import { GAP } from './defaultLayout';
 import { overlapsWithGap, Position, Rect } from './geometry';
-import { arrangeChildren, changeSize, GraphInfo, growToFit, LayoutState, moveTo } from './state';
+import { changeSize, GraphInfo, growToFit, keepPageAroundBoxes, LayoutState, moveTo, placedChildRects } from './state';
 
 // siblings closer than this count as overlapping; a pushed box moves out to the normal GAP
 const MIN_GAP = 10;
@@ -57,7 +57,9 @@ function pushClear(pusher: Rect, other: Rect, direction: Direction): void {
 }
 
 /**
- * Pushes boxes out from under a dropped box, and boxes those hit out from under them, until nothing overlaps.
+ * Pushes boxes out from under a dropped box, and boxes those hit out from under them, until nothing overlaps. A pushed
+ * box pushes what it hits the same way it was pushed, so a chain only ever moves away from the dropped box, never back
+ * under it.
  * @param rects Every sibling's rect, the dropped box included. Not changed.
  * @param droppedId The dropped box, which never moves.
  * @param onlyRightOrDown True to push only right or down, for when pushing away would go past an edge.
@@ -70,8 +72,9 @@ function runChain(rects: Map<string, Rect>, droppedId: string, onlyRightOrDown: 
 		placed.set(id, { x: rect.x, y: rect.y, width: rect.width, height: rect.height });
 	}
 
-	// boxes whose overlaps still need checking, starting with the dropped one
+	// boxes whose overlaps still need checking, starting with the dropped one, and the way each was pushed
 	const pushers = [droppedId];
+	const pushedWay = new Map<string, Direction>();
 	let steps = 0;
 	while (pushers.length > 0 && steps < MAX_STEPS) {
 		steps++;
@@ -83,8 +86,13 @@ function runChain(rects: Map<string, Rect>, droppedId: string, onlyRightOrDown: 
 				continue;
 			}
 
-			const direction = onlyRightOrDown ? shorterOfRightAndDown(pusher, other) : directionAway(pusher, other);
+			// the dropped box pushes each away from itself; anything else passes its own push on
+			let direction = pushedWay.get(pusherId);
+			if (direction === undefined) {
+				direction = onlyRightOrDown ? shorterOfRightAndDown(pusher, other) : directionAway(pusher, other);
+			}
 			pushClear(pusher, other, direction);
+			pushedWay.set(id, direction);
 
 			// it moved, so it may now overlap others in turn
 			pushers.push(id);
@@ -96,7 +104,7 @@ function runChain(rects: Map<string, Rect>, droppedId: string, onlyRightOrDown: 
 
 /**
  * Checks whether any box ended up past its directory's left or top edge.
- * @param rects The boxes, relative to the inside of their directory.
+ * @param rects The boxes, relative to the top-left of their directory's whole layout.
  * @returns True if any starts left of or above 0.
  */
 function anyPastEdge(rects: Map<string, Rect>): boolean {
@@ -109,8 +117,9 @@ function anyPastEdge(rects: Map<string, Rect>): boolean {
 }
 
 /**
- * Makes room for a dropped box: what it landed on moves away from it, and what those hit moves too. The dropped box
- * stays put. Inside a directory nothing goes past the left or top edge; if it would, everything is pushed right or
+ * Makes room for a dropped box: what it landed on moves away from it, and what those hit moves too, on any page, since
+ * every page shares one layout and a box hidden on another page would otherwise end up under it. The dropped box stays
+ * put. Inside a directory nothing goes past the layout's left or top edge; if it would, everything is pushed right or
  * down instead.
  * @param state The view state. Pushed boxes get new homes.
  * @param info The graph lookups.
@@ -119,8 +128,8 @@ function anyPastEdge(rects: Map<string, Rect>): boolean {
 export function settleDrop(state: LayoutState, info: GraphInfo, droppedId: string): void {
 	const parentId = info.nodesById.get(droppedId)!.parent!;
 
-	// arranged rects, so open boxes count at the size they're showing
-	const before = arrangeChildren(state, info, parentId);
+	// every placed sibling, on every page, so open boxes count at the size they're showing
+	const before = placedChildRects(state, info, parentId);
 
 	let after = runChain(before, droppedId, false);
 	if (anyPastEdge(after)) {
@@ -137,6 +146,9 @@ export function settleDrop(state: LayoutState, info: GraphInfo, droppedId: strin
 			state.homes.set(id, { x: home.x + dx, y: home.y + dy });
 		}
 	}
+
+	// a box pushed left or up past where the page is drawn from would be drawn outside the directory
+	keepPageAroundBoxes(state, info, parentId);
 
 	// a drop never hides a box: directories the user sized too small for what's in them now grow to fit
 	growToFit(state, info, droppedId);
