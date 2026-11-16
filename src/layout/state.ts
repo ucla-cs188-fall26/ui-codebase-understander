@@ -3,9 +3,10 @@ import { isInside, liftEdges } from '../analysis/edges';
 import { getLineage, indexChildren, indexNodes } from '../analysis/lookups';
 import { computeIndegrees, sortAllChildren } from '../analysis/metrics';
 import { defaultLayout, GAP } from './defaultLayout';
-import { overlapsWithGap, Position, Rect, Size } from './geometry';
+import { Position, Rect, Size } from './geometry';
 import { nodeSize } from './size';
 import { squishHorizontally, squishVertically, tightHeight, tightWidth } from './squish';
+import { addOwed, cancelPullsOntoOthers, carryAlong, chainInPath, copyPushes, forgetPushed, movedFrom, moveInPath, payOwed, Push, Pushes, takeBackPushes } from './push';
 
 // how many children a parent shows, and how many more each click reveals
 export const CHILD_LIMIT = 5;
@@ -25,20 +26,18 @@ export interface PageCell {
 	row: number;
 }
 
-// which page a directory shows, and how big its pages are, in its layout's coordinates. Pages are cut from an anchor:
-// the layout's top-left at first, and the current page's top-left after a resize, so resizing keeps the same part of
-// the layout in view. Columns and rows count from the anchor, so pages left of or above it have negative ones. Until
-// the user resizes the directory, its pages are all one size and the box fits its page; once they do, each page is cut
-// to fit the box on its own (fitPageToSize), and size and natural are left as they were
+// which page a directory shows, in its layout's coordinates. Columns and rows count from the anchor, so pages left of
+// or above it have negative ones. Until the user resizes the directory, its pages are a grid of one size and the box
+// fits its page; after, each page is cut to fit the box (fitPageToSize)
 export interface Page {
 	column: number;
 	row: number;
 	anchor: Position;
-	size: Size; // the page as it is now; smaller than natural while the box is too small to squish its page into
-	natural: Size; // the page at full spacing: what it opened at, or bigger once the user made the box bigger
-	drawnFrom: Position; // where the page is drawn from: the top-left of its boxes, set when it's turned to or resized
-	origins: Record<string, Position>; // where each page is drawn from, by cellKey: set when pages are cut, or as the
-	// user leaves a page, so coming back draws it from the same spot even if they moved its boxes
+	size: Size; // the grid's page size
+	natural: Size; // the page at full spacing, as it opened
+	drawnFrom: Position; // where the current page is drawn from
+	origins: Record<string, Position>; // where each page is drawn from, by cellKey, so a page turned back to is drawn
+	// from the same spot even if the user moved its boxes
 }
 
 /**
@@ -51,40 +50,29 @@ function cellKey(cell: PageCell): string {
 }
 
 /**
- * Shows another of a directory's pages: drawn from where it was when the user left it or pages were cut, so boxes
- * they moved stay where they put them, and otherwise from the top-left of its boxes. The page being left is remembered
- * the same way.
- * @param state The view state. The directory's page changes.
+ * Turns a directory to one of its pages, drawn from where it was last drawn from, so boxes the user moved stay put, or
+ * else from the top-left of its boxes. The page being left is remembered the same way. The box fits its page, so a
+ * turn can change its size, and its neighbors make room.
+ * @param state The view state.
  * @param info The graph lookups.
  * @param id The directory.
- * @param page The directory's page now.
  * @param cell The page to show.
  */
-function showPage(state: LayoutState, info: GraphInfo, id: string, page: Page, cell: PageCell): void {
-	const origins: Record<string, Position> = Object.assign({}, page.origins);
-	origins[cellKey(page)] = page.drawnFrom;
-	const start = origins[cellKey(cell)] ?? topLeftOfPage(state, info, id, cell, page.anchor, page.size);
-	state.pages.set(id, { column: cell.column, row: cell.row, anchor: page.anchor, size: page.size, natural: page.natural, drawnFrom: start, origins: origins });
+function showPage(state: LayoutState, info: GraphInfo, id: string, cell: PageCell): void {
+	function turn(): void {
+		const page = state.pages.get(id)!;
+		const origins = { ...page.origins, [cellKey(page)]: page.drawnFrom };
+		const drawnFrom = origins[cellKey(cell)] ?? topLeftOfPage(state, info, id, cell, page.anchor, page.size);
+		state.pages.set(id, { ...page, column: cell.column, row: cell.row, drawnFrom: drawnFrom, origins: origins });
 
-	// a box pushed left or up since it was last shown would be drawn outside the directory
-	keepPageAroundBoxes(state, info, id);
+		// a box pushed left or up since it was last shown would be drawn outside the directory
+		keepPageAroundBoxes(state, info, id);
+	}
+	changeSize(state, info, id, turn);
 }
 
 // the four sides of a box, where its strips can be
 export type StripSide = 'left' | 'right' | 'top' | 'bottom';
-
-// one time a box moved its siblings by changing size: how far, and which ones. Growing pushes (a positive amount) and
-// shrinking pulls (a negative one)
-export interface Push {
-	amount: number;
-	ids: string[];
-}
-
-// a box's pushes in each direction, oldest first, so the box changing size the other way takes back the latest exactly
-export interface Pushes {
-	right: Push[];
-	down: Push[];
-}
 
 // everything about the view that can differ from the default; deleting an entry brings the default back
 export interface LayoutState {
@@ -380,11 +368,10 @@ export function listPages(state: LayoutState, info: GraphInfo, id: string): Page
 	// one listing per page, found by its column and row
 	const byCell = new Map<string, PageListing>();
 	function listingFor(cell: PageCell): PageListing {
-		const key = cell.column + ',' + cell.row;
-		let listing = byCell.get(key);
+		let listing = byCell.get(cellKey(cell));
 		if (listing === undefined) {
-			listing = { cell: cell, childIds: [], isCurrent: cell.column === page!.column && cell.row === page!.row };
-			byCell.set(key, listing);
+			listing = { cell: cell, childIds: [], isCurrent: cellKey(cell) === cellKey(page!) };
+			byCell.set(cellKey(cell), listing);
 		}
 		return listing;
 	}
@@ -439,16 +426,9 @@ export function turnPage(state: LayoutState, info: GraphInfo, id: string, side: 
 			nearestAcross = across;
 		}
 	}
-	if (nearest === undefined) {
-		return;
+	if (nearest !== undefined) {
+		showPage(state, info, id, nearest);
 	}
-
-	// the box fits its page, so a page with bigger or more boxes changes its size, and its neighbors make room
-	const target = nearest;
-	function turn(): void {
-		showPage(state, info, id, page!, target);
-	}
-	changeSize(state, info, id, turn);
 }
 
 /**
@@ -560,10 +540,10 @@ export function changeSize(state: LayoutState, info: GraphInfo, id: string, chan
 }
 
 /**
- * Draws a directory the user resized big enough for its current page to fit without hiding anything. Only dragging its
- * corner moves children to other pages (fitPageToSize); anything else that needs more room, like opening a directory
- * inside it or turning to a page with a strip on another side, gets the room instead. The room is worked out again
- * after every change and never stored as the directory's size, so it goes away once nothing needs it.
+ * Draws a directory the user resized big enough for its current page to fit. Only dragging its corner moves children
+ * to other pages (fitPageToSize); anything else that needs more room, like opening a directory inside it, gets the
+ * room instead. It's worked out again after every change and never stored as the directory's size, so it goes away
+ * once nothing needs it.
  * @param state The view state. The directory's held size is set or cleared.
  * @param info The graph lookups.
  * @param id The directory.
@@ -575,14 +555,13 @@ function holdCurrentPage(state: LayoutState, info: GraphInfo, id: string): void 
 		return;
 	}
 	const rects = arrangeChildren(state, info, id);
-	const origin = childOrigin(state, info, id);
-	const room = stripRoom(state, info, id);
-	const width = Math.max(set.width, origin.x + tightWidth(rects) + PADDING + room.right);
+	const frame = pageFrame(state, info, id);
+	const width = squishHorizontally(rects, set.width - frame.width).fits ? set.width : frame.width + tightWidth(rects);
 
 	// the height is measured on the children as they're drawn at that width: squishing across slides them, which
 	// changes which ones share a column
-	const across = squishHorizontally(rects, width - origin.x - PADDING - room.right);
-	const height = Math.max(set.height, origin.y + tightHeight(across.rects) + PADDING + room.bottom);
+	const across = squishHorizontally(rects, width - frame.width);
+	const height = squishVertically(across.rects, set.height - frame.height).fits ? set.height : frame.height + tightHeight(across.rects);
 	if (width !== set.width || height !== set.height) {
 		state.heldSizes.set(id, { width: width, height: height });
 	}
@@ -599,10 +578,8 @@ function resizedSize(state: LayoutState, id: string): Size | undefined {
 }
 
 /**
- * Gives a directory the user resized as much more room as a box inside it just took, or gives back as much as the box
- * gave up, the way a directory that fits its children grows and shrinks with them. The siblings the box pushed moved by
- * that much too, so its page still fits as it did: opening a directory never squishes its siblings off their page, and
- * closing it gives the room back exactly.
+ * Grows a directory the user resized by as much as a box inside it grew, or shrinks it by as much, the way a directory
+ * that fits its children does. The box's siblings moved by that much too, so the page still fits.
  * @param state The view state. The parent's open size may change.
  * @param info The graph lookups.
  * @param id The box that changed size.
@@ -626,11 +603,9 @@ function growResizedParent(state: LayoutState, info: GraphInfo, id: string, old:
 }
 
 /**
- * Moves the siblings in a box's path to make room for its new size, or to take back room it no longer needs. Changing
- * size the other way from its latest pushes takes them back exactly, wherever those boxes are now, so closing a box
- * puts back everything opening it moved, even boxes pushed both right and down. Any change left over makes room the
- * usual way: only what's in the way moves, below it in its column, beside it in its row, and whatever those would run
- * into in turn. Either way it's recorded, so it can be taken back too.
+ * Moves the siblings in a box's path to make room for its new size, or takes back room it no longer needs. Changing
+ * size against its latest pushes takes them back exactly, so closing undoes opening. Any change left over moves what's
+ * in the way, below it in its column and beside it in its row, and is recorded so it can be taken back too.
  * @param state The view state. Siblings in the path get new homes, and the box's pushes change.
  * @param info The graph lookups.
  * @param id The box that changed size.
@@ -661,12 +636,12 @@ function moveSiblingsForSize(state: LayoutState, info: GraphInfo, id: string, ol
 	cancelPullsOntoOthers(siblings, undone);
 	for (const [siblingId, rect] of intended) {
 		if (rect !== siblings.get(siblingId) && undone.get(siblingId) === siblings.get(siblingId)) {
-			addOwed(state, siblingId, rect.x - siblings.get(siblingId)!.x, rect.y - siblings.get(siblingId)!.y);
+			addOwed(state.owed, siblingId, rect.x - siblings.get(siblingId)!.x, rect.y - siblings.get(siblingId)!.y);
 		}
 	}
 
 	// what's left of the change makes room the usual way, from the size the taking back got to
-	const from = { width: old.width + takenAcross.amount, height: old.height + takenDown.amount };
+	const from = { width: old.width + takenAcross, height: old.height + takenDown };
 	const dx = now.width - from.width;
 	const dy = now.height - from.height;
 	const after = new Map(undone);
@@ -706,7 +681,7 @@ function moveSiblingsForSize(state: LayoutState, info: GraphInfo, id: string, ol
 	const everyBefore = new Map(siblings);
 	everyBefore.set(id, { x: home.x, y: home.y, width: old.width, height: old.height });
 	after.set(id, { x: home.x, y: home.y, width: now.width, height: now.height });
-	payOwed(state, everyBefore, after);
+	payOwed(state.owed, everyBefore, after);
 
 	state.pushes.set(id, pushes);
 	for (const [boxId, rect] of after) {
@@ -719,10 +694,8 @@ function moveSiblingsForSize(state: LayoutState, info: GraphInfo, id: string, ol
 }
 
 /**
- * Makes sure a directory's current page is drawn from no further right or down than its boxes, after the code moved
- * some: a box on another page changing size can pull boxes on this one left or up past where it's drawn from, which
- * would draw them outside the directory. The user's own moves never go past it (moveTo), so this only catches the
- * code's.
+ * Makes sure a directory's current page is drawn from no further right or down than its boxes. A box on another page
+ * changing size can pull boxes on this one past it, which would draw them outside the directory.
  * @param state The view state. The page's drawn top-left may move left or up.
  * @param info The graph lookups.
  * @param parentId The directory.
@@ -740,303 +713,19 @@ export function keepPageAroundBoxes(state: LayoutState, info: GraphInfo, parentI
 		top = Math.min(top, home.y);
 	}
 	if (left !== page.drawnFrom.x || top !== page.drawnFrom.y) {
-		state.pages.set(parentId, { column: page.column, row: page.row, anchor: page.anchor, size: page.size, natural: page.natural, drawnFrom: { x: left, y: top }, origins: page.origins });
+		state.pages.set(parentId, { ...page, drawnFrom: { x: left, y: top } });
 	}
-}
-
-/**
- * Adds to how far a box still has to move back.
- * @param state The view state. Its owed moves change.
- * @param id The box.
- * @param dx How far across.
- * @param dy How far down.
- */
-function addOwed(state: LayoutState, id: string, dx: number, dy: number): void {
-	const owed = state.owed.get(id) ?? { x: 0, y: 0 };
-	state.owed.set(id, { x: owed.x + dx, y: owed.y + dy });
-}
-
-/**
- * Makes the moves boxes owe, for each one whose way is clear now: it wouldn't land on any box it isn't already
- * touching. One that moves can clear the way for another, so it checks again until none can move.
- * @param state The view state. Paid moves are cleared.
- * @param before Every sibling before this change, to tell what each was already touching.
- * @param after Where each sibling is going. Changed in place.
- */
-function payOwed(state: LayoutState, before: Map<string, Rect>, after: Map<string, Rect>): void {
-	let paidOne = true;
-	while (paidOne) {
-		paidOne = false;
-		for (const [siblingId, rect] of after) {
-			const owed = state.owed.get(siblingId);
-			if (owed === undefined) {
-				continue;
-			}
-			const moved = { x: rect.x + owed.x, y: rect.y + owed.y, width: rect.width, height: rect.height };
-			const others = new Map(after);
-			others.set(siblingId, moved);
-			if (!landsOnAnother(siblingId, moved, before, others)) {
-				after.set(siblingId, moved);
-				state.owed.delete(siblingId);
-				paidOne = true;
-			}
-		}
-	}
-}
-
-/**
- * Moves the boxes in a size change's paths: across by dx if beside it, down by dy if below it, or both.
- * @param before Every sibling before.
- * @param after Where each sibling goes. Changed in place.
- * @param beside The boxes in its row's path.
- * @param below The boxes in its column's path.
- * @param dx How far across.
- * @param dy How far down.
- */
-function moveInPath(before: Map<string, Rect>, after: Map<string, Rect>, beside: Set<string>, below: Set<string>, dx: number, dy: number): void {
-	for (const [siblingId, rect] of before) {
-		if (beside.has(siblingId) || below.has(siblingId)) {
-			after.set(siblingId, {
-				x: beside.has(siblingId) ? rect.x + dx : rect.x,
-				y: below.has(siblingId) ? rect.y + dy : rect.y,
-				width: rect.width,
-				height: rect.height,
-			});
-		}
-	}
-}
-
-/**
- * Brings along any box a pushed box would land on, moved the same way as the box that hit it, until nothing pushed
- * lands on anything it wasn't already touching. They join the push's paths, so changing back takes them back too.
- * @param before Every sibling before the push.
- * @param after Where each sibling goes. Changed in place.
- * @param beside The boxes pushed across. Grows.
- * @param below The boxes pushed down. Grows.
- * @param dx How far across.
- * @param dy How far down.
- */
-function carryAlong(before: Map<string, Rect>, after: Map<string, Rect>, beside: Set<string>, below: Set<string>, dx: number, dy: number): void {
-	let carriedOne = true;
-	while (carriedOne) {
-		carriedOne = false;
-		for (const [movedId, moved] of after) {
-			if (moved === before.get(movedId)) {
-				continue;
-			}
-			for (const [stillId, still] of after) {
-				if (still !== before.get(stillId) || !overlapsWithGap(moved, still, 0) || overlapsWithGap(before.get(movedId)!, still, 0)) {
-					continue;
-				}
-				if (beside.has(movedId)) {
-					beside.add(stillId);
-				}
-				if (below.has(movedId)) {
-					below.add(stillId);
-				}
-				moveInPath(new Map([[stillId, still]]), after, beside, below, dx, dy);
-				carriedOne = true;
-			}
-		}
-	}
-}
-
-/**
- * Copies a box's pushes, so changing the copy leaves the state's alone (copyLayoutState shares them).
- * @param pushes The box's pushes, or undefined if it has none yet.
- * @returns A copy, with copies of each push.
- */
-function copyPushes(pushes: Pushes | undefined): Pushes {
-	function copyPush(push: Push): Push {
-		return { amount: push.amount, ids: [...push.ids] };
-	}
-	if (pushes === undefined) {
-		return { right: [], down: [] };
-	}
-	return { right: pushes.right.map(copyPush), down: pushes.down.map(copyPush) };
-}
-
-/**
- * Takes back a box's latest pushes in one direction, as far as a change of size the other way goes: shrinking takes
- * back the latest pushes, and growing gives back the latest pulls. A push taken back in full is gone; one taken back
- * partly keeps what's left.
- * @param pushes The box's pushes in that direction, oldest first. Changed in place, so pass a copy.
- * @param change How much the box changed size that way.
- * @param rects The siblings' rects, moved in place as their pushes are taken back.
- * @param direction 'right' to move them across, 'down' to move them down.
- * @returns How much of the change was used up, and which siblings it moved.
- */
-function takeBackPushes(pushes: Push[], change: number, rects: Map<string, Rect>, direction: 'right' | 'down'): { amount: number; moved: Set<string> } {
-	let taken = 0;
-	const moved = new Set<string>();
-	while (pushes.length > 0) {
-		const latest = pushes[pushes.length - 1];
-		const left = change - taken;
-		if (left === 0 || Math.sign(latest.amount) === Math.sign(left)) {
-			break;
-		}
-
-		// as much of the latest push as the change covers
-		const step = Math.sign(left) * Math.min(Math.abs(latest.amount), Math.abs(left));
-		for (const siblingId of latest.ids) {
-			const rect = rects.get(siblingId);
-			if (rect !== undefined) {
-				const x = direction === 'right' ? rect.x + step : rect.x;
-				const y = direction === 'down' ? rect.y + step : rect.y;
-				rects.set(siblingId, { x: x, y: y, width: rect.width, height: rect.height });
-				moved.add(siblingId);
-			}
-		}
-		taken += step;
-
-		// what's left of it, unless it's all taken back (give or take rounding)
-		const remaining = latest.amount + step;
-		pushes.pop();
-		if (Math.abs(remaining) > 0.000001) {
-			pushes.push({ amount: remaining, ids: latest.ids });
-		}
-	}
-	return { amount: taken, moved: moved };
-}
-
-/**
- * Lists the boxes a push actually moved: the ones in its path whose rect changed.
- * @param inPath The boxes in its path.
- * @param before Every sibling before the push.
- * @param after Every sibling after it.
- * @returns Their ids.
- */
-function movedFrom(inPath: Set<string>, before: Map<string, Rect>, after: Map<string, Rect>): string[] {
-	const moved: string[] = [];
-	for (const siblingId of inPath) {
-		if (after.get(siblingId) !== before.get(siblingId)) {
-			moved.push(siblingId);
-		}
-	}
-	return moved;
-}
-
-/**
- * Takes a sibling out of a box's pushes, so changing the box's size won't move it back.
- * @param pushes The box's pushes. Changed in place, so pass a copy.
- * @param siblingId The sibling.
- */
-function forgetPushed(pushes: Pushes, siblingId: string): void {
-	for (const push of pushes.right.concat(pushes.down)) {
-		const index = push.ids.indexOf(siblingId);
-		if (index !== -1) {
-			push.ids.splice(index, 1);
-		}
-	}
-}
-
-/**
- * Keeps boxes from being pulled onto each other. A box whose pull would land it on a box it wasn't already overlapping
- * stays where it was instead. That can put it in another pulled box's way, so it checks again until nothing lands on
- * anything; each pass only puts boxes back, so it always stops.
- * @param before Every sibling's rect before the pull.
- * @param after Where each sibling would go. Changed in place.
- */
-function cancelPullsOntoOthers(before: Map<string, Rect>, after: Map<string, Rect>): void {
-	let cancelledOne = true;
-	while (cancelledOne) {
-		cancelledOne = false;
-		for (const [id, rect] of after) {
-			const start = before.get(id)!;
-			const moved = rect.x !== start.x || rect.y !== start.y;
-			if (moved && landsOnAnother(id, rect, before, after)) {
-				after.set(id, start);
-				cancelledOne = true;
-			}
-		}
-	}
-}
-
-/**
- * Checks whether a box at a new spot overlaps a sibling it didn't overlap before.
- * @param id The box.
- * @param rect Where it would be.
- * @param before Every sibling's rect before the pull.
- * @param after Where every sibling would be.
- * @returns True if it lands on one.
- */
-function landsOnAnother(id: string, rect: Rect, before: Map<string, Rect>, after: Map<string, Rect>): boolean {
-	for (const [otherId, other] of after) {
-		if (otherId === id) {
-			continue;
-		}
-		const overlapsNow = overlapsWithGap(rect, other, 0);
-		const overlappedBefore = overlapsWithGap(before.get(id)!, before.get(otherId)!, 0);
-		if (overlapsNow && !overlappedBefore) {
-			return true;
-		}
-	}
-	return false;
-}
-
-/**
- * Finds the boxes in a growing box's path in one direction: those past its edge that share its column (going down) or
- * row (going right), then those past them in theirs, since a moved box would run into them.
- * @param siblings The boxes that might be in the way, where they're drawn.
- * @param path The growing box's range across the direction (start to end) and its edge along it.
- * @param direction 'down' for a column, 'right' for a row.
- * @returns The ids of every box that has to move.
- */
-function chainInPath(siblings: Map<string, Rect>, path: { start: number; end: number; edge: number }, direction: 'down' | 'right'): Set<string> {
-	// each box as its range across the direction, and where it starts and ends along it
-	function across(rect: Rect): { start: number; end: number } {
-		return direction === 'down' ? { start: rect.x, end: rect.x + rect.width } : { start: rect.y, end: rect.y + rect.height };
-	}
-	function along(rect: Rect): { start: number; end: number } {
-		return direction === 'down' ? { start: rect.y, end: rect.y + rect.height } : { start: rect.x, end: rect.x + rect.width };
-	}
-
-	const found = new Set<string>();
-
-	// the growing box first, then each box found, each looking past its own far edge within its own range
-	const toCheck = [{ start: path.start, end: path.end, edge: path.edge }];
-	while (toCheck.length > 0) {
-		const current = toCheck.pop()!;
-		for (const [siblingId, rect] of siblings) {
-			const range = across(rect);
-			const shares = range.start < current.end && current.start < range.end;
-			if (!found.has(siblingId) && shares && along(rect).start >= current.edge) {
-				found.add(siblingId);
-				toCheck.push({ start: range.start, end: range.end, edge: along(rect).end });
-			}
-		}
-	}
-	return found;
-}
-
-/**
- * Squishes a box's children sideways into its width, the first of arrangeShown's two squishes. A side with a strip
- * gives it room; if squishing only finds out it must hide something there, it tries again with the room set aside.
- * @param rects The children as arranged.
- * @param insideWidth The room inside the box, from its left padding to its right padding.
- * @param hasRightStrip True if children past the limit already wait on the right.
- * @returns The squished children, and the ones it hid.
- */
-function squishAcross(rects: Map<string, Rect>, insideWidth: number, hasRightStrip: boolean): { rects: Map<string, Rect>; hidden: string[]; fits: boolean } {
-	let across = squishHorizontally(rects, insideWidth - (hasRightStrip ? STRIP_ROOM : 0));
-	if (across.hidden.length > 0 && !hasRightStrip) {
-		across = squishHorizontally(rects, insideWidth - STRIP_ROOM);
-	}
-	return across;
 }
 
 // what's drawn inside a box: where its shown children go, and which children wait behind each side's strip
 export interface Arrangement {
 	rects: Map<string, Rect>; // relative to where the box's page is drawn
-	hiddenLeft: string[];
-	hiddenRight: string[]; // in flow order
-	hiddenTop: string[];
-	hiddenBottom: string[];
+	hidden: HiddenSides;
 }
 
 /**
  * Works out what a box shows: the children on its page as arranged, squished into the box if the user made it smaller
- * than they need, with children on other pages and any the squish hid waiting behind strips.
+ * than they need, with children on other pages waiting behind strips.
  * @param state The view state.
  * @param info The graph lookups.
  * @param parentId The box.
@@ -1044,36 +733,19 @@ export interface Arrangement {
  */
 export function arrangeShown(state: LayoutState, info: GraphInfo, parentId: string): Arrangement {
 	const rects = arrangeChildren(state, info, parentId);
-
-	// children on other pages wait on the side their page is on
-	const past = hiddenSides(state, info, parentId);
+	const hidden = hiddenSides(state, info, parentId);
 
 	// only a size the user chose can be too small; otherwise the box fits its children
-	const set = resizedSize(state, parentId);
-	if (set === undefined || !state.expanded.has(parentId)) {
-		return { rects: rects, hiddenLeft: past.left, hiddenRight: past.right, hiddenTop: past.top, hiddenBottom: past.bottom };
+	const size = resizedSize(state, parentId);
+	if (size === undefined || !state.expanded.has(parentId)) {
+		return { rects: rects, hidden: hidden };
 	}
 
-	// the inside: within the padding on every side and below the title, measured from where children start
-	const origin = childOrigin(state, info, parentId);
-	const insideWidth = set.width - origin.x - PADDING;
-	const insideHeight = set.height - origin.y - PADDING;
-
-	// a side with a strip gives it room; if squishing only finds out it must hide something there, it tries again with
-	// the room set aside
-	const across = squishAcross(rects, insideWidth, past.right.length > 0);
-	let down = squishVertically(across.rects, insideHeight - (past.bottom.length > 0 ? STRIP_ROOM : 0));
-	if (down.hidden.length > 0 && past.bottom.length === 0) {
-		down = squishVertically(across.rects, insideHeight - STRIP_ROOM);
-	}
-
-	return {
-		rects: down.rects,
-		hiddenLeft: past.left,
-		hiddenRight: across.hidden.concat(past.right),
-		hiddenTop: past.top,
-		hiddenBottom: down.hidden.concat(past.bottom),
-	};
+	// across first, then down on what that drew
+	const frame = pageFrame(state, info, parentId);
+	const across = squishHorizontally(rects, size.width - frame.width);
+	const down = squishVertically(across.rects, size.height - frame.height);
+	return { rects: down.rects, hidden: hidden };
 }
 
 /**
@@ -1084,11 +756,26 @@ export function arrangeShown(state: LayoutState, info: GraphInfo, parentId: stri
  * @returns STRIP_ROOM on each side that has some, otherwise nothing.
  */
 function stripRoom(state: LayoutState, info: GraphInfo, id: string): { left: number; right: number; top: number; bottom: number } {
-	const past = hiddenSides(state, info, id);
-	function roomFor(hidden: string[]): number {
-		return hidden.length > 0 ? STRIP_ROOM : 0;
-	}
-	return { left: roomFor(past.left), right: roomFor(past.right), top: roomFor(past.top), bottom: roomFor(past.bottom) };
+	const hidden = hiddenSides(state, info, id);
+	return {
+		left: stripRoomIf(hidden.left.length > 0),
+		right: stripRoomIf(hidden.right.length > 0),
+		top: stripRoomIf(hidden.top.length > 0),
+		bottom: stripRoomIf(hidden.bottom.length > 0),
+	};
+}
+
+/**
+ * Finds how much of an open box isn't its page: the padding all around, the title, and room for its strips.
+ * @param state The view state.
+ * @param info The graph lookups.
+ * @param id The open box.
+ * @returns How much wider and taller the box is than its page.
+ */
+function pageFrame(state: LayoutState, info: GraphInfo, id: string): Size {
+	const origin = childOrigin(state, info, id);
+	const room = stripRoom(state, info, id);
+	return { width: origin.x + PADDING + room.right, height: origin.y + PADDING + room.bottom };
 }
 
 /**
@@ -1115,10 +802,8 @@ function fitSize(state: LayoutState, info: GraphInfo, id: string): Size {
 		bottom = Math.max(bottom, rect.y + rect.height);
 	}
 
-	// plus room for strips of children on other pages, so their padding is even too
-	const origin = childOrigin(state, info, id);
-	const room = stripRoom(state, info, id);
-	return { width: origin.x + right + PADDING + room.right, height: origin.y + bottom + PADDING + room.bottom };
+	const frame = pageFrame(state, info, id);
+	return { width: frame.width + right, height: frame.height + bottom };
 }
 
 /**
@@ -1363,19 +1048,16 @@ export function resetNode(state: LayoutState, info: GraphInfo, id: string): void
 		state.openSizes.delete(id);
 		state.heldSizes.delete(id);
 
-		// forget everything about what's inside it, at every depth: where it goes, its size, and whether it's open
+			// forget everything about what's inside it, at every depth: where it goes, its size, and whether it's open
 		for (const nodeId of info.nodesById.keys()) {
 			if (nodeId !== id && isInside(nodeId, id, info.nodesById)) {
-				state.homes.delete(nodeId);
-				state.closedSizes.delete(nodeId);
-				state.openSizes.delete(nodeId);
-				state.expanded.delete(nodeId);
-				state.pages.delete(nodeId);
-				state.childPages.delete(nodeId);
-				state.jumpOpened.delete(nodeId);
-				state.pushes.delete(nodeId);
-				state.owed.delete(nodeId);
-				state.heldSizes.delete(nodeId);
+				const perNode: { delete(key: string): boolean }[] = [
+					state.homes, state.closedSizes, state.openSizes, state.expanded, state.pages, state.childPages,
+					state.jumpOpened, state.pushes, state.owed, state.heldSizes,
+				];
+				for (const entries of perNode) {
+					entries.delete(nodeId);
+				}
 			}
 		}
 
@@ -1425,10 +1107,8 @@ export function moveTo(state: LayoutState, info: GraphInfo, id: string, position
 }
 
 /**
- * Makes sure a box that was just dropped isn't past its directory's right or bottom edge. Only that box counts, so a
- * directory the user squished stays squished when a box is dropped inside it; it grows just enough to hold a box
- * dropped past its edge, or to keep its page from hiding anything. Directories without a size the user set fit their
- * children anyway and need nothing.
+ * Makes sure a box that was just dropped isn't past its directory's right or bottom edge: a directory the user resized
+ * grows just enough to hold it, and its page. Directories without a size the user set fit their children anyway.
  * @param state The view state. Too-small open sizes are raised.
  * @param info The graph lookups.
  * @param id The box that was dropped.
@@ -1440,16 +1120,14 @@ export function growToFit(state: LayoutState, info: GraphInfo, id: string): void
 		const set = state.openSizes.get(ancestorId);
 		const rect = arrangeChildren(state, info, ancestorId).get(child);
 		if (set !== undefined && rect !== undefined) {
-			// what this one box needs: up to its far edges, plus the padding (and the title, going down)
-			const origin = childOrigin(state, info, ancestorId);
-			const room = stripRoom(state, info, ancestorId);
+			// what this one box needs: up to its far edges, plus the padding, title and strips
+			const frame = pageFrame(state, info, ancestorId);
 			state.openSizes.set(ancestorId, {
-				width: Math.max(set.width, origin.x + rect.x + rect.width + PADDING + room.right),
-				height: Math.max(set.height, origin.y + rect.y + rect.height + PADDING + room.bottom),
+				width: Math.max(set.width, frame.width + rect.x + rect.width),
+				height: Math.max(set.height, frame.height + rect.y + rect.height),
 			});
 		}
 
-		// a box dropped among others can make a row too long to squish; that's room it needs, not a reason to hide one
 		holdCurrentPage(state, info, ancestorId);
 		child = ancestorId;
 	}
@@ -1498,17 +1176,13 @@ function setSize(state: LayoutState, info: GraphInfo, id: string, size: Size): v
 	} else {
 		state.closedSizes.set(id, { width: Math.max(MIN_BOX_WIDTH, size.width), height: Math.max(MIN_BOX_HEIGHT, size.height) });
 	}
-
-	// a directory the user resized grows by as much as the box did, as changeSize goes up (growResizedParent); one that
-	// fits its children grows anyway
 }
 
 /**
- * Finds the smallest an open box can be resized to, for the size asked for: room for its biggest child, plus room for
- * only the strips its pages need at that size. A page's strips are all that changes how much room it needs, and there
- * are at most two each way, so it tries just the biggest child, then room for one strip, and takes the first where
- * every page fits; room for both always fits. Widths are tried first, since how wide the pages are decides which
- * children share a column.
+ * Finds the smallest an open box can be resized to, for the size asked for: room for its biggest child, plus only the
+ * strips its pages need at that size. Strips are all that changes how much room a page needs, so it tries room for
+ * none, then one, on a copy; room for two always fits. Widths come first, since they decide which children share a
+ * column.
  * @param state The view state.
  * @param info The graph lookups.
  * @param id The open box.
@@ -1522,24 +1196,31 @@ function minOpenSize(state: LayoutState, info: GraphInfo, id: string, size: Size
 		return most;
 	}
 
-	// the narrowest whose columns fit, with all the height strips could need
-	let width = most.width;
-	for (const tryWidth of [least.width, least.width + STRIP_ROOM]) {
-		if (cutsToFit(state, info, id, { width: Math.max(tryWidth, size.width), height: Math.max(most.height, size.height) })) {
-			width = tryWidth;
-			break;
-		}
+	// the narrowest whose columns fit, with all the height strips could need, then the shortest at that width
+	function fitsAtWidth(width: number): boolean {
+		return cutsToFit(state, info, id, { width: Math.max(width, size.width), height: Math.max(most.height, size.height) });
 	}
+	const width = smallestThatFits(least.width, most.width, fitsAtWidth);
+	function fitsAtHeight(height: number): boolean {
+		return cutsToFit(state, info, id, { width: Math.max(width, size.width), height: Math.max(height, size.height) });
+	}
+	return { width: width, height: smallestThatFits(least.height, most.height, fitsAtHeight) };
+}
 
-	// then the shortest whose pages fit, at that width
-	let height = most.height;
-	for (const tryHeight of [least.height, least.height + STRIP_ROOM]) {
-		if (cutsToFit(state, info, id, { width: Math.max(width, size.width), height: Math.max(tryHeight, size.height) })) {
-			height = tryHeight;
-			break;
+/**
+ * Tries room for no strips, then one; room for two always fits.
+ * @param least The room with no strips.
+ * @param most The room with two.
+ * @param fits Whether pages cut at a size fit.
+ * @returns The smallest of the three that fits.
+ */
+function smallestThatFits(least: number, most: number, fits: (size: number) => boolean): number {
+	for (const size of [least, least + STRIP_ROOM]) {
+		if (fits(size)) {
+			return size;
 		}
 	}
-	return { width: width, height: height };
+	return most;
 }
 
 /**
@@ -1587,12 +1268,9 @@ function cutsToFit(state: LayoutState, info: GraphInfo, id: string, size: Size):
 }
 
 /**
- * Cuts a directory's pages to fit the size the user gave it, each page on its own: columns of pages go across from the
- * current page, each as wide as fits, and each column is cut into pages down, each as tall as fits. A page makes room
- * for exactly the strips it will have, so every page squishes into the box without hiding anything, and turning to it
- * never changes the box. Bigger shows more, smaller moves children to other pages, and growing back reverses shrinking.
- * The current page's top-left stays where it is, so the same part of the layout stays in view; children before it get
- * pages too, counted back from it.
+ * Cuts a directory's pages to fit the size the user gave it: columns of pages across, each as wide as fits, then pages
+ * down each column, each as tall as fits. A page leaves room for exactly the strips it has, so every page fits and
+ * turning never changes the box. The current page stays in view.
  * @param state The view state. The directory's page and its children's pages change.
  * @param info The graph lookups.
  * @param id The directory, open, with a size the user gave it.
@@ -1606,12 +1284,11 @@ function fitPageToSize(state: LayoutState, info: GraphInfo, id: string): boolean
 	}
 	const rects = placedChildRects(state, info, id);
 
-	// pages are cut from the current page's top-left, so the same part of the layout stays in view, but only in a
-	// direction the user turned in: a left or top strip only ever comes from turning right or down. On the first page
-	// that way, they're cut from the layout's edge, so nothing ends up before the first page
+	// cut from the current page's top-left in a direction the user turned in, and otherwise from the layout's edge, so a
+	// left or top strip only ever comes from turning right or down
 	const past = hiddenSides(state, info, id);
-	const from = pageOrigin(state, id);
-	const anchor = { x: past.left.length > 0 ? from.x : Infinity, y: past.top.length > 0 ? from.y : Infinity };
+	const kept = pageOrigin(state, id);
+	const anchor = { x: past.left.length > 0 ? kept.x : Infinity, y: past.top.length > 0 ? kept.y : Infinity };
 	for (const rect of rects.values()) {
 		if (past.left.length === 0) {
 			anchor.x = Math.min(anchor.x, rect.x);
@@ -1621,8 +1298,8 @@ function fitPageToSize(state: LayoutState, info: GraphInfo, id: string): boolean
 		}
 	}
 	if (rects.size === 0) {
-		anchor.x = from.x;
-		anchor.y = from.y;
+		anchor.x = kept.x;
+		anchor.y = kept.y;
 	}
 
 	// the room inside for a page with no strips
@@ -1638,7 +1315,6 @@ function fitPageToSize(state: LayoutState, info: GraphInfo, id: string): boolean
 
 	// the page starting at the anchor is drawn from where the current page is now, unless a box on it is further left
 	// or up, so a box the user moved stays where they put it; every other page is drawn from the top-left of its boxes
-	const kept = pageOrigin(state, id);
 	function originOf(ids: string[], atAnchor: boolean): Position {
 		const corner = cornerOf(rects, ids);
 		if (!atAnchor) {
@@ -1651,7 +1327,7 @@ function fitPageToSize(state: LayoutState, info: GraphInfo, id: string): boolean
 	function fitsAcross(ids: string[], hasLeft: boolean, hasRight: boolean, atAnchor: boolean): boolean {
 		const room = width - stripRoomIf(hasLeft) - stripRoomIf(hasRight);
 		const origin = originOf(ids, atAnchor);
-		return spansNoMore(ids, xOf, origin.x, page!.natural.width, room) && fitsWithoutHiding(squishHorizontally(drawnFrom(rects, ids, origin), room));
+		return spansNoMore(ids, xOf, origin.x, page!.natural.width, room) && squishHorizontally(drawnFrom(rects, ids, origin), room).fits;
 	}
 
 	let allFit = true;
@@ -1669,7 +1345,7 @@ function fitPageToSize(state: LayoutState, info: GraphInfo, id: string): boolean
 				return false;
 			}
 			const across = squishHorizontally(drawnFrom(rects, ids, origin), columnWidth);
-			return fitsWithoutHiding(across) && fitsWithoutHiding(squishVertically(across.rects, room));
+			return across.fits && squishVertically(across.rects, room).fits;
 		};
 
 		for (const row of cutAlong(column.ids, yOf, anchor.y, fitsDown)) {
@@ -1693,14 +1369,14 @@ function fitPageToSize(state: LayoutState, info: GraphInfo, id: string): boolean
 		current = pageNearest(state, info, id, anchor);
 	}
 	const shownFrom = origins[cellKey(current)] ?? topLeftOfPage(state, info, id, current, anchor, page.size);
-	state.pages.set(id, { column: current.column, row: current.row, anchor: anchor, size: page.size, natural: page.natural, drawnFrom: shownFrom, origins: origins });
+	state.pages.set(id, { ...page, column: current.column, row: current.row, anchor: anchor, drawnFrom: shownFrom, origins: origins });
 	return allFit;
 }
 
 /**
- * Checks that a page's children start no further from where it's drawn than a page holds at full spacing: as much as
- * the room shows, or the default page if the room is smaller. Shrinking then squishes a page before it moves children
- * off, rather than packing more on at tighter gaps.
+ * Checks that a page's children start no further from where it's drawn than a page holds at full spacing: the room, or
+ * the default page if the room is smaller. So shrinking squishes a page before moving children off it, and never packs
+ * more on at tighter gaps.
  * @param ids The page's children.
  * @param startOf Where a child starts in that direction.
  * @param origin Where the page is drawn from in that direction.
@@ -1723,15 +1399,6 @@ function spansNoMore(ids: string[], startOf: (id: string) => number, origin: num
  */
 function stripRoomIf(hasStrip: boolean): number {
 	return hasStrip ? STRIP_ROOM : 0;
-}
-
-/**
- * Checks whether a squish fit everything in, without hiding any boxes.
- * @param squished What squishHorizontally or squishVertically gave back.
- * @returns True if it fit and hid nothing.
- */
-function fitsWithoutHiding(squished: { hidden: string[]; fits: boolean }): boolean {
-	return squished.fits && squished.hidden.length === 0;
 }
 
 /**
@@ -1788,17 +1455,23 @@ interface Cut {
  * @returns The runs.
  */
 function cutAlong(ids: string[], startOf: (id: string) => number, anchor: number, fits: (run: string[], hasBefore: boolean, hasAfter: boolean, atAnchor: boolean) => boolean): Cut[] {
-	// each different start, in order; a run goes from one of these to another
-	const starts = Array.from(new Set(ids.map(startOf))).sort(function ascending(a: number, b: number): number {
+	// each different start, in order, with the children starting there; a run goes from one of these to another
+	const atStart = new Map<number, string[]>();
+	for (const id of ids) {
+		atStart.set(startOf(id), (atStart.get(startOf(id)) ?? []).concat(id));
+	}
+	const starts = Array.from(atStart.keys()).sort(function ascending(a: number, b: number): number {
 		return a - b;
 	});
 	const last = starts.length - 1;
 
 	// the children starting from starts[from] through starts[to]
 	function between(from: number, to: number): string[] {
-		return ids.filter(function inRun(id: string): boolean {
-			return startOf(id) >= starts[from] && startOf(id) <= starts[to];
-		});
+		const run: string[] = [];
+		for (let i = from; i <= to; i++) {
+			run.push(...atStart.get(starts[i])!);
+		}
+		return run;
 	}
 
 	// the first start at or after the anchor; everything before it is cut backward
@@ -1874,19 +1547,27 @@ function pageNearest(state: LayoutState, info: GraphInfo, id: string, spot: Posi
 }
 
 /**
- * Makes room for every resized directory's current page after loading a layout, the way any change does: held sizes
- * aren't saved, and a layout saved before pages were cut to fit may have a page too big for its box. Nothing moves to
- * another page; that's only for dragging a corner. Deepest first, since a directory's room depends on its children's.
+ * Makes room for every resized directory's current page after loading a layout, since held sizes aren't saved. Deepest
+ * first, since a directory's room depends on its children's.
  * @param state The view state. Held sizes are set.
  * @param info The graph lookups.
  */
 export function holdPages(state: LayoutState, info: GraphInfo): void {
-	function deepestFirst(a: string, b: string): number {
-		return getLineage(b, info.nodesById).length - getLineage(a, info.nodesById).length;
-	}
-	for (const id of Array.from(state.expanded).sort(deepestFirst)) {
+	for (const id of deepestFirst(info, Array.from(state.expanded))) {
 		holdCurrentPage(state, info, id);
 	}
+}
+
+/**
+ * Sorts nodes deepest first: a lineage runs from the node up to the root, so a longer one is deeper.
+ * @param info The graph lookups.
+ * @param ids The nodes.
+ * @returns A sorted copy.
+ */
+function deepestFirst(info: GraphInfo, ids: string[]): string[] {
+	return ids.toSorted(function deeperFirst(a: string, b: string): number {
+		return getLineage(b, info.nodesById).length - getLineage(a, info.nodesById).length;
+	});
 }
 
 /**
@@ -1959,11 +1640,7 @@ function closeEarlierJumps(state: LayoutState, info: GraphInfo, keep: Set<string
 		}
 	}
 
-	// deepest first: a lineage runs from the node up to the root, so a longer one is deeper
-	function deepestFirst(a: string, b: string): number {
-		return getLineage(b, info.nodesById).length - getLineage(a, info.nodesById).length;
-	}
-	for (const id of toClose.sort(deepestFirst)) {
+	for (const id of deepestFirst(info, toClose)) {
 		closeNode(state, info, id);
 		state.jumpOpened.delete(id);
 	}
@@ -1979,13 +1656,9 @@ function closeEarlierJumps(state: LayoutState, info: GraphInfo, keep: Set<string
  */
 export function turnToPage(state: LayoutState, info: GraphInfo, id: string, cell: PageCell): void {
 	const page = state.pages.get(id);
-	if (page === undefined || (cell.column === page.column && cell.row === page.row)) {
-		return;
+	if (page !== undefined && cellKey(cell) !== cellKey(page)) {
+		showPage(state, info, id, cell);
 	}
-	function turn(): void {
-		showPage(state, info, id, page!, cell);
-	}
-	changeSize(state, info, id, turn);
 }
 
 /**

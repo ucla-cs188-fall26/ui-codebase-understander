@@ -2,7 +2,7 @@ import { Edge, ROOT_ID } from '../graph/types';
 import { getLineage } from '../analysis/lookups';
 import { isInside } from '../analysis/edges';
 import { overlapsWithGap, Position, Rect } from './geometry';
-import { arrangeShown, boxSize, childOrigin, GraphInfo, HEADER, LayoutState, PADDING, STRIP_THICKNESS, StripSide } from './state';
+import { arrangeShown, boxSize, childOrigin, GraphInfo, HEADER, hiddenSides, LayoutState, PADDING, STRIP_THICKNESS, StripSide } from './state';
 
 /**
  * Works out where every visible box sits on the page, from homes that are relative to their parents. The root is a box
@@ -446,7 +446,7 @@ export interface Strip {
 	ownerId: string; // the box it belongs to; the root's strip sits beside the top-level boxes
 	side: StripSide;
 	rect: Rect; // on the page
-	hiddenIds: string[]; // in flow order
+	hiddenIds: string[]; // most important first
 }
 
 /**
@@ -481,8 +481,7 @@ export function placeStrips(state: LayoutState, info: GraphInfo, rects: Map<stri
 			continue;
 		}
 
-		const shown = arrangeShown(state, info, id);
-		const hidden = { left: shown.hiddenLeft, right: shown.hiddenRight, top: shown.hiddenTop, bottom: shown.hiddenBottom };
+		const hidden = hiddenSides(state, info, id);
 		const leftRoom = hidden.left.length > 0 ? room : 0;
 		const rightRoom = hidden.right.length > 0 ? room : 0;
 		const topRoom = hidden.top.length > 0 ? room : 0;
@@ -491,51 +490,24 @@ export function placeStrips(state: LayoutState, info: GraphInfo, rects: Map<stri
 		// the space strips go in: inside the padding, below the title
 		const inside = { x: box.x + PADDING, y: box.y + HEADER + PADDING, width: box.width - 2 * PADDING, height: box.height - HEADER - 2 * PADDING };
 
-		// side strips: full height between the top and bottom strips
+		// side strips run the full height between the top and bottom ones, and top and bottom strips the full width
+		// between the side ones
 		const sideY = inside.y + topRoom;
 		const sideHeight = inside.height - topRoom - bottomRoom;
-		if (leftRoom > 0) {
-			strips.push({
-				id: stripId(id, 'left'),
-				ownerId: id,
-				side: 'left',
-				rect: { x: inside.x, y: sideY, width: STRIP_THICKNESS, height: sideHeight },
-				hiddenIds: hidden.left,
-			});
-		}
-		if (rightRoom > 0) {
-			strips.push({
-				id: stripId(id, 'right'),
-				ownerId: id,
-				side: 'right',
-				rect: { x: inside.x + inside.width - STRIP_THICKNESS, y: sideY, width: STRIP_THICKNESS, height: sideHeight },
-				hiddenIds: hidden.right,
-			});
-		}
-
-		// top and bottom strips: full width between the side strips
 		const acrossX = inside.x + leftRoom;
 		const acrossWidth = inside.width - leftRoom - rightRoom;
-		if (topRoom > 0) {
-			strips.push({
-				id: stripId(id, 'top'),
-				ownerId: id,
-				side: 'top',
-				rect: { x: acrossX, y: inside.y, width: acrossWidth, height: STRIP_THICKNESS },
-				hiddenIds: hidden.top,
-			});
-		}
-		if (bottomRoom > 0) {
-			strips.push({
-				id: stripId(id, 'bottom'),
-				ownerId: id,
-				side: 'bottom',
-				rect: { x: acrossX, y: inside.y + inside.height - STRIP_THICKNESS, width: acrossWidth, height: STRIP_THICKNESS },
-				hiddenIds: hidden.bottom,
-			});
+		const sides: { side: StripSide; rect: Rect }[] = [
+			{ side: 'left', rect: { x: inside.x, y: sideY, width: STRIP_THICKNESS, height: sideHeight } },
+			{ side: 'right', rect: { x: inside.x + inside.width - STRIP_THICKNESS, y: sideY, width: STRIP_THICKNESS, height: sideHeight } },
+			{ side: 'top', rect: { x: acrossX, y: inside.y, width: acrossWidth, height: STRIP_THICKNESS } },
+			{ side: 'bottom', rect: { x: acrossX, y: inside.y + inside.height - STRIP_THICKNESS, width: acrossWidth, height: STRIP_THICKNESS } },
+		];
+		for (const { side, rect } of sides) {
+			if (hidden[side].length > 0) {
+				strips.push({ id: stripId(id, side), ownerId: id, side: side, rect: rect, hiddenIds: hidden[side] });
+			}
 		}
 	}
-
 
 	return strips;
 }

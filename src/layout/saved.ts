@@ -1,6 +1,7 @@
 import { Camera } from './camera';
 import { Position, Size } from './geometry';
-import { createLayoutState, GraphInfo, LayoutState, Page, PageCell, Pushes } from './state';
+import { createLayoutState, GraphInfo, LayoutState, Page, PageCell } from './state';
+import { Pushes } from './push';
 
 // how strongly arrows draw, from the toolbar: only the selected box's, the rest faint, or everything in full
 export type ArrowMode = 'hidden' | 'default' | 'full';
@@ -57,22 +58,37 @@ export function fromSaved(saved: SavedLayout, info: GraphInfo): { state: LayoutS
 	// starts with the root open
 	const state = createLayoutState();
 
-	// files may have been deleted or renamed since this was saved
-	for (const id of saved.expanded) {
-		if (info.nodesById.has(id)) {
-			state.expanded.add(id);
+	// files may have been deleted or renamed since this was saved, so only nodes that still exist come back
+	function exists(id: string): boolean {
+		return info.nodesById.has(id);
+	}
+	function restore<T>(entries: [string, T][] | undefined, into: Map<string, T>): void {
+		for (const [id, value] of entries ?? []) {
+			if (exists(id)) {
+				into.set(id, value);
+			}
 		}
 	}
-	for (const [id, home] of saved.homes) {
-		if (info.nodesById.has(id)) {
-			state.homes.set(id, home);
-		}
+	for (const id of saved.expanded.filter(exists)) {
+		state.expanded.add(id);
 	}
+	for (const id of (saved.jumpOpened ?? []).filter(exists)) {
+		state.jumpOpened.add(id);
+	}
+	restore(saved.homes, state.homes);
+	restore(saved.childPages, state.childPages);
+	restore(saved.closedSizes, state.closedSizes);
+	restore(saved.openSizes, state.openSizes);
+
+	// a box with no pushes saved makes room the usual way the next time it changes size
+	restore(saved.pushes, state.pushes);
+	restore(saved.owed, state.owed);
+
+	// pages saved before resizing could change them have no anchor or natural size: they were cut from the layout's
+	// top-left, at the size they are; ones saved before pages were drawn from their boxes are drawn from their grid
+	// corner, until they're next turned to
 	for (const [id, page] of saved.pages ?? []) {
-		if (info.nodesById.has(id)) {
-			// pages saved before resizing could change them have no anchor or natural size: they were cut from the
-			// layout's top-left, at the size they are; ones saved before pages were drawn from their boxes are drawn from
-			// their grid corner, until they're next turned to
+		if (exists(id)) {
 			const anchor = page.anchor ?? { x: 0, y: 0 };
 			const gridCorner = { x: anchor.x + page.column * page.size.width, y: anchor.y + page.row * page.size.height };
 			state.pages.set(id, {
@@ -84,38 +100,6 @@ export function fromSaved(saved: SavedLayout, info: GraphInfo): { state: LayoutS
 				drawnFrom: page.drawnFrom ?? gridCorner,
 				origins: page.origins ?? {},
 			});
-		}
-	}
-	for (const id of saved.jumpOpened ?? []) {
-		if (info.nodesById.has(id)) {
-			state.jumpOpened.add(id);
-		}
-	}
-	for (const [id, cell] of saved.childPages ?? []) {
-		if (info.nodesById.has(id)) {
-			state.childPages.set(id, cell);
-		}
-	}
-	for (const [id, size] of saved.closedSizes) {
-		if (info.nodesById.has(id)) {
-			state.closedSizes.set(id, size);
-		}
-	}
-	for (const [id, size] of saved.openSizes) {
-		if (info.nodesById.has(id)) {
-			state.openSizes.set(id, size);
-		}
-	}
-
-	// a box with no pushes saved makes room the usual way the next time it changes size
-	for (const [id, pushes] of saved.pushes ?? []) {
-		if (info.nodesById.has(id)) {
-			state.pushes.set(id, pushes);
-		}
-	}
-	for (const [id, owed] of saved.owed ?? []) {
-		if (info.nodesById.has(id)) {
-			state.owed.set(id, owed);
 		}
 	}
 

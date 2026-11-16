@@ -45,6 +45,15 @@ export interface ModelOption {
 	family: string;
 }
 
+/**
+ * Names a language model uniquely, since two vendors can use the same id.
+ * @param model The model.
+ * @returns Its vendor and id, joined.
+ */
+export function modelKey(model: Pick<ModelOption, 'vendor' | 'id'>): string {
+	return model.vendor + '\u0000' + model.id;
+}
+
 export interface DiscoverModelsMessage {
 	type: 'discoverModels';
 }

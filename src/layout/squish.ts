@@ -1,11 +1,10 @@
 import { Rect } from './geometry';
 
-// how close boxes can be pushed together before anything has to hide
+// how close boxes can be pushed together
 const MIN_GAP = 10;
 
-// a row never hides down to fewer columns than this; with this many jammed, the directory stops shrinking. A column is
-// a stretch: boxes stacked one above another count as one, since they take one box's width
-const MIN_SHOWN_PER_ROW = 3;
+// how far past its room a row can reach and still fit: sizes built by adding and taking away can be off by rounding
+const ROUNDING = 0.000001;
 
 /**
  * Checks whether two boxes would bump into each other moving sideways: their top-to-bottom ranges overlap.
@@ -51,66 +50,71 @@ function stretchesOf(row: string[], rects: Map<string, Rect>): Stretch[] {
 	return stretches;
 }
 
+// a row measured for packing: its stretches, the space before each now, and the least each space can shrink to
+interface MeasuredRow {
+	stretches: Stretch[];
+	spaces: number[];
+	minSpaces: number[];
+	width: number; // from the inside's left edge to the end of the last stretch, as the row is now
+	tightWidth: number; // the same, packed as tight as it goes
+}
+
+/**
+ * Measures a row for packing. The space before the first stretch can shrink to nothing, and the gaps between stretches
+ * to MIN_GAP, or stay as they are if they're already smaller.
+ * @param row The row's ids.
+ * @param rects The boxes.
+ * @returns Its stretches, spaces, and widths.
+ */
+function measureRow(row: string[], rects: Map<string, Rect>): MeasuredRow {
+	const stretches = stretchesOf(row, rects);
+	const spaces: number[] = [];
+	const minSpaces: number[] = [];
+	let tightWidth = 0;
+	let end = 0;
+	for (let i = 0; i < stretches.length; i++) {
+		const space = stretches[i].start - end;
+		const minSpace = Math.min(space, i === 0 ? 0 : MIN_GAP);
+		spaces.push(space);
+		minSpaces.push(minSpace);
+		tightWidth += minSpace + stretches[i].end - stretches[i].start;
+		end = stretches[i].end;
+	}
+	return { stretches: stretches, spaces: spaces, minSpaces: minSpaces, width: end, tightWidth: tightWidth };
+}
+
 /**
  * Fits one row into a width by shrinking the empty space in it, all in the same proportion, so gaps that started even
- * stay even. The space before the first box can shrink to nothing, and the gaps between boxes to MIN_GAP. Boxes that
- * overlap sideways (at different heights) keep their exact offsets, so nothing can slide onto anything.
+ * stay even. Boxes that overlap sideways (at different heights) keep their exact offsets, so nothing can slide onto
+ * anything.
  * @param row The row's ids.
  * @param rects The boxes, relative to the inside of their directory.
  * @param width The room, from the directory's left edge to its right wall.
  * @returns The row's new rects, and whether it fit. When it can't, the boxes are placed with the smallest spaces.
  */
 function packRow(row: string[], rects: Map<string, Rect>, width: number): { placed: Map<string, Rect>; fits: boolean } {
-	const stretches = stretchesOf(row, rects);
-
-	// each stretch's space before it: now, and the least it can shrink to (never more than it is now)
-	const spaces: number[] = [];
-	const minSpaces: number[] = [];
-	let covered = 0;
-	let end = 0;
-	for (let i = 0; i < stretches.length; i++) {
-		const space = stretches[i].start - end;
-		spaces.push(space);
-		minSpaces.push(Math.min(space, i === 0 ? 0 : MIN_GAP));
-		covered += stretches[i].end - stretches[i].start;
-		end = stretches[i].end;
-	}
-
-	let spaceTotal = 0;
-	let minSpaceTotal = 0;
-	for (let i = 0; i < stretches.length; i++) {
-		spaceTotal += spaces[i];
-		minSpaceTotal += minSpaces[i];
-	}
+	const measured = measureRow(row, rects);
 
 	// how much of each space's spare room is kept: 1 leaves the row as it is, 0 packs it as tight as it goes
 	let keep = 1;
-	let fits = true;
-	if (covered + spaceTotal > width) {
-		const spare = spaceTotal - minSpaceTotal;
-		if (spare > 0) {
-			keep = (width - covered - minSpaceTotal) / spare;
-			fits = keep >= 0;
-		} else {
-			// the spaces are as small as they go already, and it still sticks out
-			keep = 0;
-			fits = false;
-		}
+	if (measured.width > width + ROUNDING) {
+		const spare = measured.width - measured.tightWidth;
+		keep = spare > 0 ? Math.max(0, (width - measured.tightWidth) / spare) : 0;
 	}
-	keep = Math.max(0, keep);
 
 	// each stretch moves as one, so its boxes keep their offsets from each other
 	const placed = new Map<string, Rect>();
 	let x = 0;
-	for (let i = 0; i < stretches.length; i++) {
-		x += minSpaces[i] + (spaces[i] - minSpaces[i]) * keep;
-		for (const id of stretches[i].ids) {
+	for (let i = 0; i < measured.stretches.length; i++) {
+		const stretch = measured.stretches[i];
+		x += measured.minSpaces[i] + (measured.spaces[i] - measured.minSpaces[i]) * keep;
+		for (const id of stretch.ids) {
 			const rect = rects.get(id)!;
-			placed.set(id, { x: x + rect.x - stretches[i].start, y: rect.y, width: rect.width, height: rect.height });
+			placed.set(id, { x: x + rect.x - stretch.start, y: rect.y, width: rect.width, height: rect.height });
 		}
-		x += stretches[i].end - stretches[i].start;
+		x += stretch.end - stretch.start;
 	}
-	return { placed: placed, fits: fits };
+	return { placed: placed, fits: measured.tightWidth <= width + ROUNDING };
 }
 
 /**
@@ -130,68 +134,6 @@ function rowOf(rects: Map<string, Rect>, id: string): string[] {
 		}
 	}
 	return row;
-}
-
-/**
- * Picks the box latest in the flow: furthest right, and for a tie, lowest.
- * @param ids The boxes to choose from.
- * @param rects Their rects.
- * @returns The latest one's id.
- */
-function latestInFlow(ids: string[], rects: Map<string, Rect>): string {
-	let latest = ids[0];
-	for (const id of ids) {
-		const rect = rects.get(id)!;
-		const best = rects.get(latest)!;
-		if (rect.x > best.x || (rect.x === best.x && rect.y > best.y)) {
-			latest = id;
-		}
-	}
-	return latest;
-}
-
-/**
- * Fits a directory's children into a width: each row's gaps shrink evenly, and when a row is packed tight and still
- * doesn't fit, its latest box in the flow goes behind the right strip. A row never hides down to fewer than
- * MIN_SHOWN_PER_ROW columns (stretches). Rows don't affect each other.
- * @param rects The children as arranged, relative to the inside of the directory.
- * @param width The room inside the directory, from its left edge to its right wall.
- * @returns The shown children's new rects, the hidden ones in flow order, and whether everything fit. It doesn't when
- *   the width is below minSquishWidth.
- */
-export function squishHorizontally(rects: Map<string, Rect>, width: number): { rects: Map<string, Rect>; hidden: string[]; fits: boolean } {
-	const placed = new Map<string, Rect>();
-	const hidden: string[] = [];
-	let fits = true;
-
-	for (const startingRow of rowsOf(rects)) {
-		const row = [...startingRow];
-
-		// each round either fits, stops at the 3-column minimum, or hides one more box, so it always ends
-		while (true) {
-			const packed = packRow(row, rects, width);
-			if (packed.fits || stretchesOf(row, rects).length <= MIN_SHOWN_PER_ROW) {
-				for (const [id, rect] of packed.placed) {
-					placed.set(id, rect);
-				}
-				fits = fits && packed.fits;
-				break;
-			}
-
-			// only this row loses a box: its latest in the flow
-			const latest = latestInFlow(row, rects);
-			row.splice(row.indexOf(latest), 1);
-			hidden.push(latest);
-		}
-	}
-
-	// hidden in flow order, leftmost first, which is the order they'd come back in
-	function compareFlow(a: string, b: string): number {
-		const rectA = rects.get(a)!;
-		const rectB = rects.get(b)!;
-		return rectA.x !== rectB.x ? rectA.x - rectB.x : rectA.y - rectB.y;
-	}
-	return { rects: placed, hidden: hidden.toSorted(compareFlow), fits: fits };
 }
 
 /**
@@ -216,45 +158,33 @@ function rowsOf(rects: Map<string, Rect>): string[][] {
 }
 
 /**
- * Finds the narrowest a directory's inside can get before a row would have to hide more than it's allowed: each row's
- * first MIN_SHOWN_PER_ROW columns (stretches), each as wide as it covers, packed MIN_GAP apart.
- * @param rects The children as arranged.
- * @returns The smallest width that still fits, from the inside's left edge.
+ * Fits a directory's children into a width: each row's gaps shrink evenly. Rows don't affect each other.
+ * @param rects The children as arranged, relative to the inside of the directory.
+ * @param width The room inside the directory, from its left edge to its right wall.
+ * @returns The children's new rects, and whether every row fit. One that doesn't is packed as tight as it goes.
  */
-export function minSquishWidth(rects: Map<string, Rect>): number {
-	let widest = 0;
+export function squishHorizontally(rects: Map<string, Rect>, width: number): { rects: Map<string, Rect>; fits: boolean } {
+	const placed = new Map<string, Rect>();
+	let fits = true;
 	for (const row of rowsOf(rects)) {
-		// stretches come left to right, so these are the start of the flow; stacked boxes count once
-		const firstColumns = stretchesOf(row, rects).slice(0, MIN_SHOWN_PER_ROW);
-		let width = MIN_GAP * (firstColumns.length - 1);
-		for (const column of firstColumns) {
-			width += column.end - column.start;
+		const packed = packRow(row, rects, width);
+		for (const [id, rect] of packed.placed) {
+			placed.set(id, rect);
 		}
-		widest = Math.max(widest, width);
+		fits = fits && packed.fits;
 	}
-	return widest;
+	return { rects: placed, fits: fits };
 }
 
 /**
- * Finds the narrowest a directory's inside can get with nothing hidden: each row's boxes as wide as they cover, with the
- * space before the first gone and the gaps between them down to MIN_GAP (or less, if they started closer).
+ * Finds the narrowest a directory's inside can get: each row packed as tight as it goes.
  * @param rects The children as arranged.
- * @returns The smallest width every row still fits in, from the inside's left edge.
+ * @returns The smallest width every row fits in, from the inside's left edge.
  */
 export function tightWidth(rects: Map<string, Rect>): number {
 	let widest = 0;
 	for (const row of rowsOf(rects)) {
-		const stretches = stretchesOf(row, rects);
-		let width = 0;
-		let end = 0;
-		for (let i = 0; i < stretches.length; i++) {
-			if (i > 0) {
-				width += Math.min(stretches[i].start - end, MIN_GAP);
-			}
-			width += stretches[i].end - stretches[i].start;
-			end = stretches[i].end;
-		}
-		widest = Math.max(widest, width);
+		widest = Math.max(widest, measureRow(row, rects).tightWidth);
 	}
 	return widest;
 }
@@ -274,30 +204,21 @@ function transpose(rects: Map<string, Rect>): Map<string, Rect> {
 
 /**
  * Fits a directory's children into a height, like a wall moving up from the bottom: the same rules as
- * squishHorizontally, with columns instead of rows, and the lowest box in a jammed column hiding first.
+ * squishHorizontally, with columns instead of rows.
  * @param rects The children as arranged, relative to the inside of the directory.
  * @param height The room inside the directory, from its top edge to its bottom wall.
- * @returns The shown children's new rects, the hidden ones in flow order, and whether everything fit.
+ * @returns The children's new rects, and whether every column fit.
  */
-export function squishVertically(rects: Map<string, Rect>, height: number): { rects: Map<string, Rect>; hidden: string[]; fits: boolean } {
+export function squishVertically(rects: Map<string, Rect>, height: number): { rects: Map<string, Rect>; fits: boolean } {
 	const squished = squishHorizontally(transpose(rects), height);
-	return { rects: transpose(squished.rects), hidden: squished.hidden, fits: squished.fits };
+	return { rects: transpose(squished.rects), fits: squished.fits };
 }
 
 /**
- * Finds the shortest a directory's inside can get with nothing hidden, the way tightWidth does across.
+ * Finds the shortest a directory's inside can get, the way tightWidth does across.
  * @param rects The children as arranged.
- * @returns The smallest height every column still fits in, from the inside's top edge.
+ * @returns The smallest height every column fits in, from the inside's top edge.
  */
 export function tightHeight(rects: Map<string, Rect>): number {
 	return tightWidth(transpose(rects));
-}
-
-/**
- * Finds the shortest a directory's inside can get before a column would have to hide more than it's allowed.
- * @param rects The children as arranged.
- * @returns The smallest height that still fits, from the inside's top edge.
- */
-export function minSquishHeight(rects: Map<string, Rect>): number {
-	return minSquishWidth(transpose(rects));
 }

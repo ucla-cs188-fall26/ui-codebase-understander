@@ -80,7 +80,7 @@
     "check-types": "tsc --noEmit",
     "lint": "eslint src",
     "test": "vscode-test",
-    "test:unit": "tsc -p . --outDir out && mocha --ui tdd out/test/graph.test.js"
+    "test:unit": "tsc -p . --outDir out && mocha --ui tdd \"out/test/*.test.js\" --ignore out/test/extension.test.js"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",

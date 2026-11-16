@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { randomBytes } from 'crypto';
 import { loadGraph } from './loadGraph';
-import { ExtensionToWebview, FlowScenario, ModelOption, StyleColors, WebviewToExtension } from '../messages';
+import { ExtensionToWebview, FlowScenario, ModelOption, modelKey, StyleColors, WebviewToExtension } from '../messages';
 import { SavedLayout } from '../layout/saved';
 import { Graph } from '../graph/types';
 import { CODE_EXTENSIONS } from '../graph/imports';
@@ -51,16 +51,7 @@ export async function openGraphPanel(context: vscode.ExtensionContext): Promise<
 	const workspaceUri = workspaceFolder.uri;
 	const activeWorkspaceFolder = workspaceFolder;
 
-	const distDirectory = vscode.Uri.joinPath(context.extensionUri, 'dist');
-	const panel = vscode.window.createWebviewPanel(
-		'codeflowGraph',
-		'Codeflow: ' + workspaceFolder.name,
-		vscode.ViewColumn.One,
-		{ enableScripts: true, localResourceRoots: [distDirectory] },
-	);
-
-	const scriptUri = panel.webview.asWebviewUri(vscode.Uri.joinPath(distDirectory, 'webview.js'));
-	panel.webview.html = buildHtml(scriptUri);
+	const panel = createPanel(context, 'codeflowGraph', 'Codeflow: ' + workspaceFolder.name, vscode.ViewColumn.One);
 
 	// start scanning now, so it runs while the webview loads
 	const graphPromise = loadGraph(workspaceFolder);
@@ -89,16 +80,7 @@ export async function openGraphPanel(context: vscode.ExtensionContext): Promise<
 		if (message.type === 'discoverModels') {
 			try {
 				// This is deliberately initiated by the user's click: VS Code may ask for consent here.
-				const models = await vscode.lm.selectChatModels();
-				const blocked = new Set(context.globalState.get<string[]>(BLOCKED_MODELS_KEY, []));
-				const options: ModelOption[] = models
-					.filter((model) => !blocked.has(modelKey(model)) && context.languageModelAccessInformation.canSendRequest(model) !== false)
-					.map((model) => ({
-					id: model.id,
-					vendor: model.vendor,
-					name: model.name,
-					family: model.family,
-					}));
+				const options = usableModels(context, await vscode.lm.selectChatModels());
 				const selected = context.workspaceState.get<ModelOption>(MODEL_KEY);
 				panel.webview.postMessage({
 					type: 'models',
@@ -161,9 +143,7 @@ export async function openGraphPanel(context: vscode.ExtensionContext): Promise<
 					blocked.add(modelKey(selected));
 					await context.globalState.update(BLOCKED_MODELS_KEY, Array.from(blocked));
 					await context.workspaceState.update(MODEL_KEY, undefined);
-					const available = currentModels
-						.filter((candidate) => !blocked.has(modelKey(candidate)) && context.languageModelAccessInformation.canSendRequest(candidate) !== false)
-						.map((candidate) => ({ id: candidate.id, vendor: candidate.vendor, name: candidate.name, family: candidate.family }));
+					const available = usableModels(context, currentModels);
 					panel.webview.postMessage({
 						type: 'models',
 						models: available,
@@ -237,6 +217,21 @@ export async function openGraphPanel(context: vscode.ExtensionContext): Promise<
 }
 
 /**
+ * Opens a panel running the webview's script.
+ * @param context The extension context, for file paths.
+ * @param viewType VS Code's id for the kind of panel.
+ * @param title The panel's tab title.
+ * @param column Where it opens.
+ * @returns The panel.
+ */
+function createPanel(context: vscode.ExtensionContext, viewType: string, title: string, column: vscode.ViewColumn): vscode.WebviewPanel {
+	const distDirectory = vscode.Uri.joinPath(context.extensionUri, 'dist');
+	const panel = vscode.window.createWebviewPanel(viewType, title, column, { enableScripts: true, localResourceRoots: [distDirectory] });
+	panel.webview.html = buildHtml(panel.webview, distDirectory);
+	return panel;
+}
+
+/**
  * Reads the user's color settings.
  * @returns Each codeflow.* color; an empty one means follow the theme.
  */
@@ -250,6 +245,14 @@ function readStyleColors(): StyleColors {
 	};
 }
 
+/**
+ * Opens a flow in its own panel: its files in order, one row of boxes, each clickable to open the file. Steps whose files
+ * no longer exist, aren't files, or repeat are dropped.
+ * @param context The extension context.
+ * @param workspaceFolder The folder the graph is of.
+ * @param graph The graph.
+ * @param flow The flow.
+ */
 async function openFlowPanel(context: vscode.ExtensionContext, workspaceFolder: vscode.WorkspaceFolder, graph: Graph, flow: FlowScenario): Promise<void> {
 	const nodesById = new Map(graph.nodes.map((node) => [node.id, node]));
 	const seen = new Set<string>();
@@ -269,15 +272,7 @@ async function openFlowPanel(context: vscode.ExtensionContext, workspaceFolder: 
 	const flowEdges = steps.slice(1).map((step, index) => ({ from: steps[index].nodeId, to: step.nodeId, kind: 'flow' as const }));
 	const flowGraph: Graph = { nodes: flowNodes, edges: flowEdges };
 	const safeFlow: FlowScenario = { ...flow, steps: steps, entryNodeId: steps[0].nodeId };
-	const distDirectory = vscode.Uri.joinPath(context.extensionUri, 'dist');
-	const panel = vscode.window.createWebviewPanel(
-		'codeflowFlow',
-		'Flow: ' + flow.title,
-		vscode.ViewColumn.Beside,
-		{ enableScripts: true, localResourceRoots: [distDirectory] },
-	);
-	const scriptUri = panel.webview.asWebviewUri(vscode.Uri.joinPath(distDirectory, 'webview.js'));
-	panel.webview.html = buildHtml(scriptUri);
+	const panel = createPanel(context, 'codeflowFlow', 'Flow: ' + flow.title, vscode.ViewColumn.Beside);
 	const workspaceUri = workspaceFolder.uri;
 	const allowedPaths = new Set(flowNodes.map((node) => node.path));
 	panel.webview.onDidReceiveMessage(async (message: WebviewToExtension) => {
@@ -313,11 +308,32 @@ function otherColumn(panel: vscode.WebviewPanel): vscode.ViewColumn {
 	return right ?? left ?? vscode.ViewColumn.Beside;
 }
 
-function modelKey(model: Pick<ModelOption, 'vendor' | 'id'>): string {
-	return model.vendor + '\u0000' + model.id;
+/**
+ * Lists the language models this extension may use: not ones it's found VS Code keeps to itself, and not ones the user
+ * hasn't allowed.
+ * @param context The extension context, which remembers blocked models and knows what's allowed.
+ * @param models The models VS Code offered.
+ * @returns Them, as the webview shows them.
+ */
+function usableModels(context: vscode.ExtensionContext, models: vscode.LanguageModelChat[]): ModelOption[] {
+	const blocked = new Set(context.globalState.get<string[]>(BLOCKED_MODELS_KEY, []));
+	const usable: ModelOption[] = [];
+	for (const model of models) {
+		if (!blocked.has(modelKey(model)) && context.languageModelAccessInformation.canSendRequest(model) !== false) {
+			usable.push({ id: model.id, vendor: model.vendor, name: model.name, family: model.family });
+		}
+	}
+	return usable;
 }
 
-/** Builds a bounded, repository-grounded prompt from graph metadata and source files. */
+/**
+ * Builds the prompt asking a model for flows: the graph's nodes and edges and excerpts of the source, most likely
+ * entry points first, trimmed until it fits the model's input.
+ * @param workspaceFolder The folder the graph is of.
+ * @param graph The graph.
+ * @param model The model, for its input limit.
+ * @returns The prompt.
+ */
 async function buildFlowPrompt(workspaceFolder: vscode.WorkspaceFolder, graph: Graph, model: vscode.LanguageModelChat): Promise<string> {
 	let nodes = graph.nodes.slice(0, 500).map((node) => ({ id: node.id, kind: node.kind, path: node.path }));
 	let edges = graph.edges.slice(0, 700).map((edge) => ({ from: edge.from, to: edge.to, kind: edge.kind }));
@@ -347,7 +363,7 @@ async function buildFlowPrompt(workspaceFolder: vscode.WorkspaceFolder, graph: G
 		}
 	}
 
-function makePrompt(): string {
+	function makePrompt(): string {
 		return `Analyze this repository and identify up to 8 concrete user-facing or system flows (for example, sign in, create a record, submit a form, or load a page). Use the source excerpts and import graph as evidence. A flow is an ordered path through files, not a claim that import arrows prove runtime call order. Prefer distinct, meaningful scenarios; do not invent features unsupported by the repository.
 
 Return only valid JSON with this shape:
@@ -362,7 +378,7 @@ ${JSON.stringify(edges)}
 
 SOURCE EXCERPTS:
 ${source.join('\n\n')}`;
-}
+	}
 
 	let prompt = makePrompt();
 	const targetTokens = Math.max(512, Math.floor(model.maxInputTokens * 0.82));
@@ -384,6 +400,11 @@ ${source.join('\n\n')}`;
 	return prompt;
 }
 
+/**
+ * Scores how likely a file is to be part of a flow, from words in its path, so the prompt's source excerpts start there.
+ * @param path The file's path.
+ * @returns Higher for likelier files.
+ */
 function sourcePriority(path: string): number {
 	const lower = path.toLowerCase();
 	let score = 0;
@@ -398,6 +419,13 @@ function sourcePriority(path: string): number {
 	return score;
 }
 
+/**
+ * Reads the flows out of a model's reply, keeping only well-formed ones whose steps are files in the graph, starting at
+ * the entry point.
+ * @param responseText The model's reply, JSON perhaps wrapped in a code fence.
+ * @param graph The graph.
+ * @returns Up to 8 flows, each with up to 8 steps.
+ */
 function parseFlowScenarios(responseText: string, graph: Graph): FlowScenario[] {
 	const jsonText = responseText.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
 	const start = jsonText.indexOf('{');
@@ -449,750 +477,24 @@ function parseFlowScenarios(responseText: string, graph: Graph): FlowScenario[] 
 }
 
 /**
- * Writes the webview page. Only tags carrying a random nonce may run, which blocks injected scripts.
- * @param scriptUri The webview-safe address of dist/webview.js.
+ * Writes the webview page. Only scripts carrying a random nonce may run, which blocks injected scripts, and only
+ * stylesheets from the extension's own files load.
+ * @param webview The panel's webview, for the addresses its files are served from.
+ * @param distDirectory The extension's dist folder, which holds webview.js and webview.css.
  * @returns The page's HTML.
  */
-function buildHtml(scriptUri: vscode.Uri): string {
+function buildHtml(webview: vscode.Webview, distDirectory: vscode.Uri): string {
+	const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(distDirectory, 'webview.js'));
+	const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(distDirectory, 'webview.css'));
 	const nonce = randomBytes(16).toString('hex');
 
 	return `<!DOCTYPE html>
 <html lang="en">
 <head>
 	<meta charset="UTF-8">
-	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
+	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
-	<style nonce="${nonce}">
-		html {
-			height: 100%;
-		}
-		body {
-			height: 100%;
-			cursor: grab;
-			margin: 0;
-			padding: 0;
-			overflow: hidden;
-			background-color: var(--vscode-editor-background);
-			/* a faint dot grid, like a scratchpad; applyCamera moves, spaces, and sizes it with the view */
-			--dot-size: 0.6px;
-			background-image: radial-gradient(circle, color-mix(in srgb, var(--vscode-editorLineNumber-foreground) 25%, transparent) var(--dot-size), transparent calc(var(--dot-size) + 0.5px));
-			background-size: 20px 20px;
-			color: var(--vscode-editor-foreground);
-			font-family: var(--vscode-font-family);
-			font-size: var(--vscode-font-size);
-		}
-		body.panning {
-			cursor: grabbing;
-		}
-		/* while a box is being dragged, keep the move cursor everywhere, even off the box */
-		body.dragging,
-		body.dragging * {
-			cursor: move;
-		}
-		/* the same while resizing, with the diagonal resize cursor */
-		body.resizing,
-		body.resizing * {
-			cursor: nwse-resize;
-		}
-		/* the selected box's lower-right corner, for resizing it */
-		.resize-handle {
-			position: absolute;
-			right: 0;
-			bottom: 0;
-			display: flex;
-			color: var(--vscode-descriptionForeground);
-			cursor: nwse-resize;
-		}
-		.resize-handle svg {
-			fill: none;
-			stroke: currentColor;
-			stroke-width: 1.5;
-		}
-		/* the triangle: filled, with a stroke of the same color whose round joins round off its corners */
-		.resize-handle svg .icon-fill {
-			fill: currentColor;
-			stroke: currentColor;
-			stroke-width: 2;
-			stroke-linejoin: round;
-		}
-		#world {
-			position: relative;
-			transform-origin: 0 0;
-			/* dragging boxes and panning shouldn't select their text; the sidebar is outside, so paths there still copy */
-			user-select: none;
-		}
-		/* while the view glides to a box, the dots glide along with it */
-		body.gliding #world {
-			transition: transform 300ms ease-out;
-		}
-		body.gliding {
-			transition: background-position 300ms ease-out, background-size 300ms ease-out;
-		}
-		.arrow {
-			position: absolute;
-			left: 0;
-			top: 0;
-			overflow: visible;
-			pointer-events: none;
-		}
-		/* --arrow-width is set on each arrow, thicker the more imports it stands for */
-		.arrow path {
-			fill: none;
-			stroke: var(--cf-arrow, var(--vscode-editorLineNumber-foreground));
-			stroke-width: var(--arrow-width, 1.5px);
-		}
-		/* the wide, invisible copy of each arrow that catches its clicks */
-		.arrow path.arrow-hit {
-			stroke: transparent;
-			stroke-width: 12;
-			pointer-events: stroke;
-			cursor: pointer;
-		}
-		/* each arrow's head, a filled triangle drawn with it, so it takes the same colors as its line */
-		.arrow path.arrow-head {
-			fill: var(--cf-arrow, var(--vscode-editorLineNumber-foreground));
-			stroke: none;
-		}
-		.arrow:hover path.arrow-line {
-			stroke: var(--vscode-editor-foreground);
-		}
-		.arrow:hover path.arrow-head {
-			fill: var(--vscode-editor-foreground);
-		}
-		/* a selected arrow keeps its width and turns yellow */
-		.arrow.selected path.arrow-line {
-			stroke: var(--cf-highlight, var(--vscode-charts-yellow, #e2c08d));
-		}
-		.arrow.selected path.arrow-head {
-			fill: var(--cf-highlight, var(--vscode-charts-yellow, #e2c08d));
-		}
-		/* arrows that aren't the selected box's, in the default arrow setting */
-		.arrow.faint {
-			opacity: 0.3;
-		}
-		.arrow.faint:hover {
-			opacity: 1;
-		}
-		/* a column: the title on top, and for an open box, room for its children below */
-		.box {
-			position: absolute;
-			box-sizing: border-box;
-			display: flex;
-			flex-direction: column;
-			border: 1px solid var(--vscode-panel-border);
-			border-radius: 8px;
-			/* anything inside, like a folder's tinted title, follows the rounded corners */
-			overflow: hidden;
-			/* one step lighter (toward the text color) per level of nesting, so a box always stands out from the one
-			   around it; --depth is set on each box */
-			background: color-mix(in srgb, var(--vscode-editor-foreground) min(calc(var(--depth, 1) * var(--cf-shade-step, 4%)), var(--cf-max-shade, 24%)), var(--vscode-editor-background));
-		}
-		.box-title {
-			display: flex;
-			flex-shrink: 0;
-			align-items: center;
-			min-width: 0;
-			padding: 0 10px;
-		}
-		/* only the selected box can be moved, by its title (all of a closed box); everything else pans */
-		.box.selected > .box-title {
-			cursor: move;
-		}
-		/* the root can't be moved, so its title doesn't offer to */
-		.box.repo.selected > .box-title {
-			cursor: default;
-		}
-		/* which page an open directory is on, dimmed just after its name; clicking it lists the pages */
-		.page-counter {
-			flex-shrink: 0;
-			margin-left: 6px;
-			padding: 1px 5px;
-			border: none;
-			border-radius: 4px;
-			background: none;
-			color: var(--vscode-descriptionForeground);
-			font: inherit;
-			font-size: 11px;
-			cursor: pointer;
-		}
-		.page-counter:hover {
-			background: var(--vscode-toolbar-hoverBackground);
-			color: var(--vscode-editor-foreground);
-		}
-		/* the list of a directory's pages, below its page number */
-		#page-menu {
-			display: none;
-			position: fixed;
-			z-index: 1001;
-			min-width: 180px;
-			max-width: 320px;
-			max-height: 50vh;
-			flex-direction: column;
-			padding: 4px;
-			overflow-y: auto;
-			border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
-			border-radius: 6px;
-			background: var(--vscode-editorWidget-background);
-			color: var(--vscode-editorWidget-foreground);
-			box-shadow: 0 4px 16px var(--vscode-widget-shadow);
-		}
-		#page-menu.visible {
-			display: flex;
-		}
-		.page-menu-item {
-			display: flex;
-			gap: 8px;
-			padding: 4px 8px;
-			border: none;
-			border-radius: 4px;
-			background: none;
-			color: inherit;
-			font: inherit;
-			text-align: left;
-			cursor: pointer;
-		}
-		.page-menu-item:hover {
-			background: var(--vscode-list-hoverBackground);
-		}
-		.page-menu-item.current {
-			background: var(--vscode-list-inactiveSelectionBackground);
-		}
-		.page-menu-number {
-			flex-shrink: 0;
-			min-width: 1.2em;
-			color: var(--vscode-descriptionForeground);
-		}
-		.page-menu-names {
-			overflow: hidden;
-			white-space: nowrap;
-			text-overflow: ellipsis;
-		}
-		/* muted dots at the right end of the selected box's title, a sign that it can be dragged */
-		.grip {
-			display: flex;
-			flex-shrink: 0;
-			margin-left: auto;
-			padding-left: 6px;
-			visibility: hidden;
-			color: var(--vscode-descriptionForeground);
-		}
-		.box.selected > .box-title .grip {
-			visibility: visible;
-		}
-		.grip svg {
-			fill: none;
-			stroke: currentColor;
-			stroke-width: 2;
-			stroke-linecap: round;
-		}
-		/* a closed box is all title */
-		.box:not(.open) .box-title {
-			flex: 1;
-		}
-		/* an open box's title is a header strip as tall as the space the layout leaves for it (HEADER in state.ts),
-		   in the card color, sitting on the darker inside */
-		.box.open .box-title {
-			height: 32px;
-			box-sizing: border-box;
-			border-bottom: 1px solid var(--vscode-panel-border);
-			border-radius: 7px 7px 0 0;
-			background: var(--vscode-editorWidget-background);
-		}
-		.box.directory {
-			font-weight: 600;
-		}
-		.box.selected {
-			border-color: var(--cf-highlight, var(--vscode-charts-yellow, #e2c08d));
-		}
-		/* the box under the mouse, so it's clear which one a click would act on; the selected box keeps its own
-		   border, and nothing lights up while dragging, panning, or resizing */
-		body:not(.dragging):not(.panning):not(.resizing) .box:hover:not(.selected):not(.repo) {
-			border-color: var(--vscode-descriptionForeground);
-		}
-		.chevron {
-			display: inline-flex;
-			flex-shrink: 0;
-			align-items: center;
-			justify-content: center;
-			width: 20px;
-			height: 20px;
-			margin: 0 4px 0 -4px;
-			border-radius: 4px;
-			font-size: 14px;
-			cursor: pointer;
-		}
-		.chevron:hover {
-			background: var(--vscode-toolbar-hoverBackground);
-		}
-		/* folders: an accent bar down the left edge, and a faint tint of it in the title */
-		.box.directory {
-			box-shadow: inset 3px 0 0 var(--cf-folder, var(--vscode-charts-blue));
-		}
-		/* files: no bar unless the user picks a file color */
-		.box.file {
-			box-shadow: inset 3px 0 0 var(--cf-file, transparent);
-		}
-		.box.directory > .box-title {
-			background: color-mix(in srgb, var(--cf-folder, var(--vscode-charts-blue)) 10%, transparent);
-		}
-		/* the root, around everything: see-through, with a faint dashed border, so it doesn't compete with what's inside */
-		.box.repo {
-			background: transparent;
-			border-style: dashed;
-		}
-		.box.repo > .box-title {
-			border-bottom: none;
-		}
-		/* a "+N" bar in a box's padding, standing in for the children hidden on that side */
-		.strip {
-			position: absolute;
-			cursor: pointer;
-			box-sizing: border-box;
-			display: flex;
-			align-items: center;
-			justify-content: center;
-			overflow: hidden;
-			border-radius: 4px;
-			border: 2px dotted var(--vscode-descriptionForeground);
-			color: var(--vscode-descriptionForeground);
-			font-size: 11px;
-			white-space: nowrap;
-		}
-		.strip:hover {
-			color: var(--vscode-editor-foreground);
-			background: var(--vscode-toolbar-hoverBackground);
-		}
-		/* a right strip is tall and thin, so its count reads top to bottom */
-		.strip-left,
-		.strip-right {
-			writing-mode: vertical-rl;
-		}
-		#sidebar {
-			display: none;
-			position: fixed;
-			top: 12px;
-			right: 12px;
-			width: 280px;
-			max-height: calc(100% - 24px);
-			z-index: 1000;
-			box-sizing: border-box;
-			padding: 12px 16px;
-			overflow-y: auto;
-			cursor: default;
-			border-radius: 8px;
-			background: var(--vscode-editorWidget-background);
-			color: var(--vscode-editorWidget-foreground);
-			border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
-			box-shadow: 0 4px 16px var(--vscode-widget-shadow);
-		}
-		#sidebar.visible {
-			display: block;
-		}
-		/* the same floating-card look as the sidebar, so both read as part of the graph view */
-		#toolbar {
-			position: fixed;
-			top: 12px;
-			left: 12px;
-			z-index: 1000;
-			display: flex;
-			gap: 2px;
-			padding: 4px;
-			cursor: default;
-			border-radius: 8px;
-			background: var(--vscode-editorWidget-background);
-			color: var(--vscode-editorWidget-foreground);
-			border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
-			box-shadow: 0 4px 16px var(--vscode-widget-shadow);
-		}
-		.sidebar-header {
-			display: flex;
-			align-items: center;
-			gap: 8px;
-			font-weight: 600;
-		}
-		.icon-button {
-			display: flex;
-			flex-shrink: 0;
-			align-items: center;
-			justify-content: center;
-			width: 24px;
-			height: 24px;
-			padding: 0;
-			border: none;
-			border-radius: 4px;
-			background: none;
-			color: inherit;
-			cursor: pointer;
-		}
-		.icon-button:hover {
-			background: var(--vscode-toolbar-hoverBackground);
-		}
-		.icon-button svg {
-			fill: none;
-			stroke: currentColor;
-			stroke-width: 1.5;
-		}
-		/* the parts of an icon drawn solid, like the arrows icon's dot */
-		.icon-button svg .icon-fill {
-			fill: currentColor;
-			stroke: none;
-		}
-		.sidebar-actions {
-			display: flex;
-			flex-wrap: wrap;
-			gap: 8px;
-			margin: 10px 0 14px;
-		}
-		/* toolbar grays and a widget border, which every theme shows; some themes leave secondary button colors transparent */
-		/* a thin line between groups of toolbar controls */
-		.toolbar-divider {
-			align-self: stretch;
-			width: 1px;
-			margin: 2px 4px;
-			background: var(--vscode-widget-border, var(--vscode-panel-border));
-		}
-		/* a toolbar button with its popup, which hangs below it */
-		.popup-anchor {
-			position: relative;
-			display: flex;
-		}
-		.popup {
-			display: none;
-			position: absolute;
-			top: calc(100% + 10px);
-			left: 0;
-			width: max-content;
-			flex-direction: column;
-			gap: 10px;
-			padding: 12px 16px;
-			border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
-			border-radius: 8px;
-			background: var(--vscode-editorWidget-background);
-			box-shadow: 0 4px 16px var(--vscode-widget-shadow);
-		}
-		.popup.visible {
-			display: flex;
-		}
-		.popup-heading {
-			font-weight: 600;
-		}
-		/* a label, then its control */
-		.popup-row {
-			display: grid;
-			grid-template-columns: 3em auto;
-			align-items: center;
-			column-gap: 12px;
-		}
-		.popup-control {
-			display: flex;
-			align-items: center;
-			gap: 8px;
-		}
-		/* the arrow strength that's on */
-		.text-button[aria-pressed="true"] {
-			border-color: var(--vscode-focusBorder);
-			background: var(--vscode-toolbar-activeBackground);
-		}
-		.settings-row {
-			display: flex;
-			flex-wrap: wrap;
-			align-items: center;
-			gap: 6px;
-		}
-		.text-button {
-			display: inline-flex;
-			align-items: center;
-			gap: 6px;
-			padding: 4px 8px;
-			border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
-			border-radius: 4px;
-			background: var(--vscode-toolbar-hoverBackground);
-			color: inherit;
-			font: inherit;
-			line-height: 1;
-			cursor: pointer;
-		}
-		.text-button:hover {
-			background: var(--vscode-toolbar-activeBackground);
-		}
-		.text-button:disabled {
-			cursor: wait;
-			opacity: 0.7;
-		}
-		#model-select,
-		#arrow-depth {
-			max-width: 230px;
-			padding: 3px 6px;
-			border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
-			border-radius: 4px;
-			background: var(--vscode-dropdown-background);
-			color: var(--vscode-dropdown-foreground);
-			font: inherit;
-		}
-		#arrow-depth {
-			width: 3.5em;
-		}
-		/* in dark themes, draw the field's up/down arrows dark too; the browser's own are white by default */
-		body.vscode-dark #arrow-depth,
-		body.vscode-high-contrast #arrow-depth {
-			color-scheme: dark;
-		}
-		/* the deepest level, dimmed beside the depth */
-		/* the deepest level beside the depth field: "/ 6", dimmed */
-		.arrow-depth-max {
-			align-self: center;
-			color: var(--vscode-descriptionForeground);
-			font-size: 11px;
-		}
-		/* the depth row: a small, even gap on each side of the slash */
-		.depth-control {
-			gap: 4px;
-		}
-		#model-select:disabled {
-			opacity: 0.75;
-		}
-		#model-status {
-			align-self: center;
-			max-width: 220px;
-			padding: 0 4px;
-			overflow: hidden;
-			color: var(--vscode-descriptionForeground);
-			font-size: 11px;
-			text-overflow: ellipsis;
-			white-space: nowrap;
-		}
-		#flow-results {
-			display: none;
-			position: fixed;
-			top: 58px;
-			left: 12px;
-			width: min(380px, calc(100% - 24px));
-			max-height: calc(100% - 70px);
-			z-index: 1000;
-			box-sizing: border-box;
-			padding: 12px 14px;
-			overflow-y: auto;
-			cursor: default;
-			border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
-			border-radius: 8px;
-			background: var(--vscode-editorWidget-background);
-			color: var(--vscode-editorWidget-foreground);
-			box-shadow: 0 4px 16px var(--vscode-widget-shadow);
-		}
-		#flow-results.visible {
-			display: block;
-		}
-		#flow-description {
-			display: none;
-			position: fixed;
-		top: 58px;
-			left: 12px;
-			max-width: min(560px, calc(100% - 24px));
-			z-index: 1000;
-			box-sizing: border-box;
-			padding: 10px 14px;
-			border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
-			border-radius: 8px;
-			background: var(--vscode-editorWidget-background);
-			color: var(--vscode-editorWidget-foreground);
-			box-shadow: 0 4px 16px var(--vscode-widget-shadow);
-		}
-		#flow-description.visible {
-			display: grid;
-			gap: 4px;
-		}
-		#flow-description small,
-		.flow-node-path,
-		.flow-step-action {
-			color: var(--vscode-descriptionForeground);
-		}
-		.flow-view-title {
-			max-width: min(480px, 50vw);
-			padding: 0 8px;
-		overflow: hidden;
-			text-overflow: ellipsis;
-			white-space: nowrap;
-		}
-		.flow-node .box-title {
-			flex: 0 0 34px;
-			box-sizing: border-box;
-			border-bottom: 1px solid var(--vscode-panel-border);
-		}
-		.flow-node-path {
-			padding: 5px 10px 0;
-			overflow: hidden;
-			font-size: 11px;
-			text-overflow: ellipsis;
-			white-space: nowrap;
-		}
-		.flow-step-action {
-			padding: 5px 10px;
-			font-size: 12px;
-			line-height: 1.3;
-		}
-		.flow-title-button {
-			padding: 0;
-			border: 0;
-			background: none;
-			color: inherit;
-			font: inherit;
-			font-weight: 600;
-			text-align: left;
-			cursor: pointer;
-		}
-		.flow-title-button:hover {
-			color: var(--vscode-textLink-foreground);
-			text-decoration: underline;
-		}
-		.flow-results-header {
-			display: flex;
-			align-items: center;
-			justify-content: space-between;
-			margin-bottom: 8px;
-		}
-		.flow-status {
-			margin-bottom: 8px;
-			color: var(--vscode-descriptionForeground);
-		}
-		.flow-card {
-			padding: 10px 0;
-			border-top: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
-		}
-		.flow-card p {
-			margin: 4px 0 8px;
-			color: var(--vscode-descriptionForeground);
-		}
-		.flow-card ol {
-			margin: 0;
-			padding-left: 22px;
-		}
-		.flow-card li {
-			margin: 5px 0;
-		}
-		.flow-path-button {
-			padding: 0;
-			border: 0;
-			background: none;
-			color: var(--vscode-textLink-foreground);
-			font: inherit;
-			text-align: left;
-			cursor: pointer;
-			word-break: break-word;
-		}
-		.flow-path-button:hover {
-			text-decoration: underline;
-		}
-		.text-button svg {
-			display: block;
-			fill: none;
-			stroke: currentColor;
-			stroke-width: 1.5;
-		}
-		.sidebar-close {
-			margin-left: auto;
-		}
-		.sidebar-row {
-			display: flex;
-			gap: 8px;
-			margin-top: 6px;
-		}
-		.sidebar-label {
-			flex-shrink: 0;
-			width: 110px;
-			color: var(--vscode-descriptionForeground);
-		}
-		.sidebar-value {
-			overflow-wrap: anywhere;
-		}
-		.sidebar-link {
-			display: flex;
-			align-items: center;
-			gap: 4px;
-			cursor: pointer;
-		}
-		.sidebar-link-text {
-			flex: 1;
-			overflow: hidden;
-			white-space: nowrap;
-			text-overflow: ellipsis;
-		}
-		.sidebar-link:hover .sidebar-link-text {
-			color: var(--vscode-textLink-foreground);
-			text-decoration: underline;
-		}
-		/* small open arrows, in list rows and next to Path: one per row would be cluttered, so each only shows on
-		   the row under the mouse; small, since even hidden it sets how tall its row is */
-		.sidebar-link .icon-button,
-		.sidebar-row .icon-button {
-			visibility: hidden;
-			width: 18px;
-			height: 18px;
-		}
-		.sidebar-link .icon-button svg,
-		.sidebar-row .icon-button svg {
-			width: 14px;
-			height: 14px;
-		}
-		.sidebar-link:hover .icon-button,
-		.sidebar-row:hover .icon-button {
-			visibility: visible;
-		}
-		/* a detail row with an arrow centers it on the text; other rows stay top-aligned so wrapped labels read well */
-		.sidebar-row:has(.icon-button) {
-			align-items: center;
-		}
-		/* opens or closes a folder row in the import lists; an empty spot on file rows keeps names lined up */
-		.sidebar-toggle {
-			flex-shrink: 0;
-			box-sizing: content-box; /* the row's indent is left padding on top of this width */
-			width: 20px;
-			align-self: stretch;
-			display: flex;
-			align-items: center;
-			justify-content: center;
-			color: var(--vscode-descriptionForeground);
-			font-size: 12px;
-		}
-		.sidebar-toggle:not(:empty) {
-			cursor: pointer;
-		}
-		.sidebar-toggle:not(:empty):hover {
-			color: var(--vscode-editor-foreground);
-		}
-		/* how many imports go through a row */
-		.sidebar-count {
-			flex-shrink: 0;
-			color: var(--vscode-descriptionForeground);
-			font-size: 11px;
-		}
-		/* a place an import is written, under its file: dimmer, so it reads as detail */
-		.sidebar-line {
-			color: var(--vscode-descriptionForeground);
-		}
-		/* "hidden in", before an arrow end that's a strip: dim, like a note */
-		.sidebar-hidden {
-			color: var(--vscode-descriptionForeground);
-			font-weight: normal;
-		}
-		.sidebar-empty {
-			color: var(--vscode-descriptionForeground);
-		}
-		.sidebar-section {
-			margin: 16px 0 4px;
-			font-size: 11px;
-			text-transform: uppercase;
-			color: var(--vscode-descriptionForeground);
-		}
-		/* a box's name in a list's title, in its own case, so it reads as a name */
-		.sidebar-section-name {
-			text-transform: none;
-		}
-		.label {
-			overflow: hidden;
-			white-space: nowrap;
-			text-overflow: ellipsis;
-		}
-	</style>
+	<link rel="stylesheet" href="${styleUri}">
 </head>
 <body>
 	<div id="world"></div>

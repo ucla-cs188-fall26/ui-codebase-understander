@@ -1,5 +1,5 @@
-import { Edge, LineRange, Node, NodeKind, ROOT_ID } from '../graph/types';
-import { ExtensionToWebview, FlowGraphMessage, FlowScenario, ModelOption, WebviewToExtension } from '../messages';
+import { Edge, LineRange, NodeKind, ROOT_ID } from '../graph/types';
+import { ExtensionToWebview, FlowGraphMessage, FlowScenario, ModelOption, modelKey, WebviewToExtension } from '../messages';
 import { connections, isInside } from '../analysis/edges';
 import { getLineage } from '../analysis/lookups';
 import { Arrow, arrowBounds, arrowHead, arrowPath, arrowWidth, placeArrows } from '../layout/arrows';
@@ -24,31 +24,66 @@ const START_Y = 40;
 const DRAG_RAISE = 100000;
 
 /**
+ * Makes an element with a class and text, the way most of the panel's pieces start.
+ * @param tag The element's tag.
+ * @param className Its classes; empty for none.
+ * @param text Its text; empty for none.
+ * @returns The element, not on the page yet.
+ */
+function makeElement<Tag extends keyof HTMLElementTagNameMap>(tag: Tag, className = '', text = ''): HTMLElementTagNameMap[Tag] {
+	const element = document.createElement(tag);
+	if (className !== '') {
+		element.className = className;
+	}
+	if (text !== '') {
+		element.textContent = text;
+	}
+	return element;
+}
+
+/**
+ * Makes a button that's just an icon, with what it does shown on hover.
+ * @param icon The icon, from icons.ts.
+ * @param title What the button does.
+ * @param onClick What clicking it does.
+ * @returns The button.
+ */
+function makeIconButton(icon: SVGSVGElement, title: string, onClick: (event: MouseEvent) => void): HTMLButtonElement {
+	const button = makeElement('button', 'icon-button');
+	button.title = title;
+	button.appendChild(icon);
+	button.addEventListener('click', onClick);
+	return button;
+}
+
+/**
+ * Positions an element absolutely over a rect.
+ * @param element The element.
+ * @param rect Where it goes, in pixels.
+ */
+function placeAt(element: HTMLElement, rect: Rect): void {
+	element.style.left = rect.x + 'px';
+	element.style.top = rect.y + 'px';
+	element.style.width = rect.width + 'px';
+	element.style.height = rect.height + 'px';
+}
+
+/**
  * Makes one box element.
  * @param label The text inside the box.
  * @param kind A class for styling: 'repo', 'directory', or 'file'.
- * @param x The left edge, in pixels.
- * @param y The top edge, in pixels.
- * @param width The width, in pixels.
- * @param height The height, in pixels.
+ * @param rect Where it goes, in pixels.
  * @returns The element, absolutely positioned. Not on the page until someone appends it.
  */
-function makeBox(label: string, kind: string, x: number, y: number, width: number, height: number): HTMLElement {
-	const box = document.createElement('div');
-	box.className = 'box ' + kind;
-	box.style.left = x + 'px';
-	box.style.top = y + 'px';
-	box.style.width = width + 'px';
-	box.style.height = height + 'px';
+function makeBox(label: string, kind: string, rect: Rect): HTMLElement {
+	const box = makeElement('div', 'box ' + kind);
+	placeAt(box, rect);
 
 	// the title: all of a closed box, the strip across the top of an open one; it's where you grab a box to move it
-	const title = document.createElement('div');
-	title.className = 'box-title';
+	const title = makeElement('div', 'box-title');
 	box.appendChild(title);
 
-	const text = document.createElement('span');
-	text.className = 'label';
-	text.textContent = label;
+	const text = makeElement('span', 'label', label);
 	title.appendChild(text);
 
 	return box;
@@ -69,8 +104,7 @@ function makePageCounter(id: string, pages: PageListing[]): HTMLElement {
 		}
 	}
 
-	const counter = document.createElement('button');
-	counter.className = 'page-counter';
+	const counter = makeElement('button', 'page-counter');
 	counter.dataset.id = id;
 	counter.textContent = current + '/' + pages.length;
 	counter.title = 'Page ' + current + ' of ' + pages.length + '. Click to pick another';
@@ -126,18 +160,13 @@ function makePageMenuItem(id: string, page: PageListing, number: number): HTMLEl
 		text += ' +' + (page.childIds.length - PAGE_MENU_NAMES);
 	}
 
-	const item = document.createElement('button');
-	item.className = 'page-menu-item';
+	const item = makeElement('button', 'page-menu-item');
 	if (page.isCurrent) {
 		item.classList.add('current');
 	}
-	const numberElement = document.createElement('span');
-	numberElement.className = 'page-menu-number';
-	numberElement.textContent = String(number);
+	const numberElement = makeElement('span', 'page-menu-number', String(number));
 	item.appendChild(numberElement);
-	const namesElement = document.createElement('span');
-	namesElement.className = 'page-menu-names';
-	namesElement.textContent = text;
+	const namesElement = makeElement('span', 'page-menu-names', text);
 	item.appendChild(namesElement);
 
 	function pick(): void {
@@ -204,15 +233,11 @@ function makeArrow(arrow: Arrow, edge: VisibleEdge, zIndex: number, under: Rect[
 	// The SVG needs a viewport around the whole curve; otherwise only the portion in its default 300x150 box
 	// receives pointer events, even though overflow lets the rest of the curve remain visible.
 	const bounds = arrowBounds(arrow);
-	const left = bounds.x;
-	const top = bounds.y;
-	const width = bounds.width;
-	const height = bounds.height;
-	svg.setAttribute('viewBox', left + ' ' + top + ' ' + width + ' ' + height);
-	svg.setAttribute('width', String(width));
-	svg.setAttribute('height', String(height));
-	svg.style.left = left + 'px';
-	svg.style.top = top + 'px';
+	svg.setAttribute('viewBox', bounds.x + ' ' + bounds.y + ' ' + bounds.width + ' ' + bounds.height);
+	svg.setAttribute('width', String(bounds.width));
+	svg.setAttribute('height', String(bounds.height));
+	svg.style.left = bounds.x + 'px';
+	svg.style.top = bounds.y + 'px';
 
 	// it shows everywhere except over the boxes it passes under: its whole area, with a hole cut for each of them.
 	// The clip also lets clicks there through to the box
@@ -223,7 +248,7 @@ function makeArrow(arrow: Arrow, edge: VisibleEdge, zIndex: number, under: Rect[
 	const clip = document.createElementNS(SVG_NS, 'clipPath');
 	clip.id = clipId;
 	const shape = document.createElementNS(SVG_NS, 'path');
-	let d = rectPath({ x: left, y: top, width: width, height: height });
+	let d = rectPath(bounds);
 	for (const rect of under) {
 		d += ' ' + rectPath(rect);
 	}
@@ -238,11 +263,11 @@ function makeArrow(arrow: Arrow, edge: VisibleEdge, zIndex: number, under: Rect[
 	const fade = document.createElementNS(SVG_NS, 'mask');
 	fade.id = fadeId;
 	fade.setAttribute('maskUnits', 'userSpaceOnUse');
-	fade.setAttribute('x', String(left));
-	fade.setAttribute('y', String(top));
-	fade.setAttribute('width', String(width));
-	fade.setAttribute('height', String(height));
-	fade.appendChild(makeMaskRect({ x: left, y: top, width: width, height: height }, 0, 'white', 1));
+	fade.setAttribute('x', String(bounds.x));
+	fade.setAttribute('y', String(bounds.y));
+	fade.setAttribute('width', String(bounds.width));
+	fade.setAttribute('height', String(bounds.height));
+	fade.appendChild(makeMaskRect(bounds, 0, 'white', 1));
 	for (const rect of under) {
 		for (let band = FADE_BANDS; band >= 1; band--) {
 			fade.appendChild(makeMaskRect(rect, band * FADE_STEP, 'black', FADE_DARKEN));
@@ -371,16 +396,11 @@ function endsUnderDraggedBox(arrow: Arrow, rects: Map<string, Rect>): boolean {
  * @returns The element.
  */
 function makeStrip(strip: Strip, zIndex: number): HTMLElement {
-	const element = document.createElement('div');
-	element.className = 'strip strip-' + strip.side;
+	const element = makeElement('div', 'strip strip-' + strip.side, '+' + strip.hiddenIds.length);
 	element.dataset.ownerId = strip.ownerId;
 	element.dataset.side = strip.side;
-	element.style.left = strip.rect.x + 'px';
-	element.style.top = strip.rect.y + 'px';
-	element.style.width = strip.rect.width + 'px';
-	element.style.height = strip.rect.height + 'px';
+	placeAt(element, strip.rect);
 	element.style.zIndex = String(zIndex);
-	element.textContent = '+' + strip.hiddenIds.length;
 
 	// the hidden names on hover
 	const names: string[] = [];
@@ -485,7 +505,7 @@ function drawGraph(): void {
 		const node = info.nodesById.get(id)!;
 		const isOpen = state.expanded.has(id);
 		const kind = isOpen ? node.kind + ' open' : node.kind;
-		const box = makeBox(node.name, kind, rect.x, rect.y, rect.width, rect.height);
+		const box = makeBox(node.name, kind, rect);
 
 		// how deeply it's nested, for its shade: top-level boxes are 1; a lineage runs from the node up to the root
 		box.style.setProperty('--depth', String(getLineage(id, info.nodesById).length - 1));
@@ -500,9 +520,7 @@ function drawGraph(): void {
 
 		// anything that can hold children gets an arrow to open or close it, except the root, which is always open
 		if (node.kind !== 'file' && id !== ROOT_ID) {
-			const chevron = document.createElement('span');
-			chevron.className = 'chevron';
-			chevron.textContent = isOpen ? '▾' : '▸';
+			const chevron = makeElement('span', 'chevron', isOpen ? '▾' : '▸');
 			box.querySelector('.box-title')!.prepend(chevron);
 		}
 
@@ -514,16 +532,14 @@ function drawGraph(): void {
 
 		// a grip at the title's right end, so it's clear the title is where to grab the box; the root can't be dragged
 		if (id !== ROOT_ID) {
-			const grip = document.createElement('span');
-			grip.className = 'grip';
+			const grip = makeElement('span', 'grip');
 			grip.appendChild(makeGripIcon());
 			box.querySelector('.box-title')!.appendChild(grip);
 		}
 
 		// only the selected box can be resized, the same as moving; the root always can, since it's hard to select
 		if (id === selectedId || id === ROOT_ID) {
-			const handle = document.createElement('span');
-			handle.className = 'resize-handle';
+			const handle = makeElement('span', 'resize-handle');
 			handle.appendChild(makeResizeIcon());
 			box.appendChild(handle);
 		}
@@ -538,30 +554,30 @@ function drawGraph(): void {
 	scheduleSave();
 }
 
-/** Draws a flow as a left-to-right sequence, reusing the graph's node boxes and arrow renderer. */
+// the flow view's boxes: their size, and the gap between them
+const FLOW_BOX = { width: 280, height: 112 };
+const FLOW_GAP = 110;
+
+/**
+ * Draws a flow, in its own panel, as one row of boxes left to right, with the graph's boxes and arrows. Its toolbar and
+ * description replace the graph's.
+ * @param view The flow and its files.
+ */
 function drawFlowGraph(view: FlowGraphMessage): void {
 	flowView = view;
 	info = undefined;
 	const toolbar = document.getElementById('toolbar')!;
 	toolbar.replaceChildren();
-	const title = document.createElement('strong');
-	title.className = 'flow-view-title';
-	title.textContent = view.flow.title;
+	const title = makeElement('strong', 'flow-view-title', view.flow.title);
 	toolbar.appendChild(title);
-	const fit = document.createElement('button');
-	fit.className = 'icon-button';
-	fit.title = 'Fit flow to view';
-	fit.appendChild(makeFitIcon());
-	fit.addEventListener('click', fitToView);
+	const fit = makeIconButton(makeFitIcon(), 'Fit flow to view', fitToView);
 	toolbar.appendChild(fit);
 
 	const description = document.getElementById('flow-description')!;
 	description.replaceChildren();
-	const summary = document.createElement('div');
-	summary.textContent = view.flow.summary;
+	const summary = makeElement('div', '', view.flow.summary);
 	description.appendChild(summary);
-	const entry = document.createElement('small');
-	entry.textContent = 'Entry point: ' + view.flow.entryNodeId;
+	const entry = makeElement('small', '', 'Entry point: ' + view.flow.entryNodeId);
 	description.appendChild(entry);
 	description.classList.add('visible');
 	document.getElementById('flow-results')!.classList.remove('visible');
@@ -569,38 +585,38 @@ function drawFlowGraph(view: FlowGraphMessage): void {
 
 	const world = document.getElementById('world')!;
 	world.replaceChildren();
+
+	// what each file does in the flow
+	const actions = new Map<string, string>();
+	for (const step of view.flow.steps) {
+		actions.set(step.nodeId, step.action);
+	}
+
+	// one row, centered down the panel
 	const rects = new Map<string, Rect>();
-	const actions = new Map(view.flow.steps.map((step) => [step.nodeId, step.action]));
-	const boxWidth = 280;
-	const boxHeight = 112;
-	const gap = 110;
-	const y = Math.max(100, window.innerHeight / 2 - boxHeight / 2);
-	view.graph.nodes.forEach((node, index) => {
-		rects.set(node.id, { x: 40 + index * (boxWidth + gap), y: y, width: boxWidth, height: boxHeight });
-	});
+	const y = Math.max(100, window.innerHeight / 2 - FLOW_BOX.height / 2);
+	for (let i = 0; i < view.graph.nodes.length; i++) {
+		rects.set(view.graph.nodes[i].id, { x: START_X + i * (FLOW_BOX.width + FLOW_GAP), y: y, width: FLOW_BOX.width, height: FLOW_BOX.height });
+	}
+
+	// the boxes sit in one row, so no arrow passes under any
 	const arrows = placeArrows(view.graph.edges, rects);
 	for (let i = 0; i < arrows.length; i++) {
-		// the flow's boxes sit in one row, so no arrow passes under any
 		const flowEdge = view.graph.edges[i];
 		world.appendChild(makeArrow(arrows[i], { from: flowEdge.from, to: flowEdge.to, kind: flowEdge.kind, count: 1, edges: [flowEdge] }, 1, [], false, undefined));
 	}
-	view.graph.nodes.forEach((node: Node, index) => {
-		const rect = rects.get(node.id)!;
-		const box = makeBox(node.name, node.kind, rect.x, rect.y, rect.width, rect.height);
+
+	for (let i = 0; i < view.graph.nodes.length; i++) {
+		const node = view.graph.nodes[i];
+		const box = makeBox(node.name, node.kind, rects.get(node.id)!);
 		box.classList.add('flow-node');
 		box.dataset.id = node.id;
 		box.dataset.path = node.path;
 		box.style.zIndex = '2';
-		const path = document.createElement('div');
-		path.className = 'flow-node-path';
-		path.textContent = node.path;
-		box.appendChild(path);
-		const action = document.createElement('div');
-		action.className = 'flow-step-action';
-		action.textContent = (index + 1) + '. ' + (actions.get(node.id) ?? '');
-		box.appendChild(action);
+		box.appendChild(makeElement('div', 'flow-node-path', node.path));
+		box.appendChild(makeElement('div', 'flow-step-action', (i + 1) + '. ' + (actions.get(node.id) ?? '')));
 		world.appendChild(box);
-	});
+	}
 	lastRects = rects;
 	const bounds = boundsOf(rects.values());
 	if (bounds !== undefined) {
@@ -649,8 +665,7 @@ function drawSidebar(): void {
 	addSidebarHeader(sidebar, document.createTextNode(node.name));
 
 	// what you can do with this node, before the details you read
-	const actions = document.createElement('div');
-	actions.className = 'sidebar-actions';
+	const actions = makeElement('div', 'sidebar-actions');
 
 	// short labels so both buttons fit on one line; the tooltip says it in full
 	const open = makeTextButton(makeOpenIcon(), node.kind === 'file' ? 'Open' : 'Show');
@@ -791,14 +806,12 @@ function drawEdgeSidebar(sidebar: HTMLElement, selected: Edge): void {
  * @param title What goes in the title: the box's name, or the arrow's two ends.
  */
 function addSidebarHeader(sidebar: HTMLElement, title: HTMLElement | DocumentFragment | Text): void {
-	const header = document.createElement('div');
-	header.className = 'sidebar-header';
+	const header = makeElement('div', 'sidebar-header');
 	const titleElement = document.createElement('span');
 	titleElement.appendChild(title);
 	header.appendChild(titleElement);
 
-	const close = document.createElement('button');
-	close.className = 'icon-button sidebar-close';
+	const close = makeElement('button', 'icon-button sidebar-close');
 	close.title = 'Close';
 	close.appendChild(makeCloseIcon());
 	close.addEventListener('click', handleSidebarClose);
@@ -844,9 +857,7 @@ function hiddenPrefix(end: string): string {
 function makeEndLabel(end: string, text: string): HTMLElement {
 	const label = document.createElement('span');
 	if (end !== nodeOfEnd(end)) {
-		const hidden = document.createElement('em');
-		hidden.className = 'sidebar-hidden';
-		hidden.textContent = 'hidden in ';
+		const hidden = makeElement('em', 'sidebar-hidden', 'hidden in ');
 		label.appendChild(hidden);
 	}
 	label.appendChild(document.createTextNode(text));
@@ -861,17 +872,12 @@ function makeEndLabel(end: string, text: string): HTMLElement {
  * @returns The row, so more can be added to it.
  */
 function addDetail(sidebar: HTMLElement, label: string, value: string): HTMLElement {
-	const row = document.createElement('div');
-	row.className = 'sidebar-row';
+	const row = makeElement('div', 'sidebar-row');
 
-	const labelElement = document.createElement('span');
-	labelElement.className = 'sidebar-label';
-	labelElement.textContent = label;
+	const labelElement = makeElement('span', 'sidebar-label', label);
 	row.appendChild(labelElement);
 
-	const valueElement = document.createElement('span');
-	valueElement.className = 'sidebar-value';
-	valueElement.textContent = value;
+	const valueElement = makeElement('span', 'sidebar-value', value);
 	row.appendChild(valueElement);
 
 	sidebar.appendChild(row);
@@ -885,8 +891,7 @@ function addDetail(sidebar: HTMLElement, label: string, value: string): HTMLElem
  * @returns The button, with no click handler yet.
  */
 function makeTextButton(icon: SVGSVGElement, label: string): HTMLButtonElement {
-	const button = document.createElement('button');
-	button.className = 'text-button';
+	const button = makeElement('button', 'text-button');
 	button.appendChild(icon);
 	button.append(label);
 	return button;
@@ -991,8 +996,7 @@ function addImportLine(byRow: Map<string, ImportLine[]>, rowId: string, line: Im
  * @returns The button.
  */
 function makeOpenButton(path: string, kind: NodeKind): HTMLButtonElement {
-	const button = document.createElement('button');
-	button.className = 'icon-button';
+	const button = makeElement('button', 'icon-button');
 	button.title = kind === 'file' ? 'Open in editor' : 'Show in Explorer';
 	button.dataset.path = path;
 	button.dataset.kind = kind;
@@ -1031,13 +1035,9 @@ function addConnectionList(sidebar: HTMLElement, title: string, groups: LinkGrou
 	const relativeTo = options.relativeTo;
 	const lines = options.lines;
 
-	const heading = document.createElement('div');
-	heading.className = 'sidebar-section';
-	heading.textContent = title;
+	const heading = makeElement('div', 'sidebar-section', title);
 	if (options.name !== undefined) {
-		const name = document.createElement('span');
-		name.className = 'sidebar-section-name';
-		name.textContent = ' ' + options.name;
+		const name = makeElement('span', 'sidebar-section-name', ' ' + options.name);
 		heading.appendChild(name);
 	}
 	if (options.hint !== undefined) {
@@ -1046,9 +1046,7 @@ function addConnectionList(sidebar: HTMLElement, title: string, groups: LinkGrou
 	sidebar.appendChild(heading);
 
 	if (groups.length === 0) {
-		const empty = document.createElement('div');
-		empty.className = 'sidebar-empty';
-		empty.textContent = 'None';
+		const empty = makeElement('div', 'sidebar-empty', 'None');
 		sidebar.appendChild(empty);
 		return;
 	}
@@ -1090,17 +1088,13 @@ function addConnectionList(sidebar: HTMLElement, title: string, groups: LinkGrou
  * @returns The row.
  */
 function makeLinkRow(row: LinkGroup, text: string, level: number, key: string, canOpen: boolean): HTMLElement {
-	const link = document.createElement('div');
-	link.className = 'sidebar-link';
+	const link = makeElement('div', 'sidebar-link');
 	link.title = row.id; // the full path on hover
 	link.dataset.id = row.id;
 	link.addEventListener('click', handleConnectionClick);
 
 	// an empty spot for rows with nothing inside, so names line up
-	const toggle = document.createElement('span');
-	toggle.className = 'sidebar-toggle';
-	// the indent is part of the toggle, so clicking left of the arrow opens the row instead of jumping
-	toggle.style.paddingLeft = (level * 16) + 'px';
+	const toggle = makeRowToggle(level);
 	if (canOpen) {
 		toggle.textContent = openLinkRows.has(key) ? '▾' : '▸';
 		// a file row opens to its import lines; a folder row to what's inside it
@@ -1120,14 +1114,10 @@ function makeLinkRow(row: LinkGroup, text: string, level: number, key: string, c
 	}
 	link.appendChild(toggle);
 
-	const textElement = document.createElement('span');
-	textElement.className = 'sidebar-link-text';
-	textElement.textContent = text;
+	const textElement = makeElement('span', 'sidebar-link-text', text);
 	link.appendChild(textElement);
 
-	const count = document.createElement('span');
-	count.className = 'sidebar-count';
-	count.textContent = String(row.count);
+	const count = makeElement('span', 'sidebar-count', String(row.count));
 	count.title = row.count === 1 ? '1 import' : row.count + ' imports';
 	link.appendChild(count);
 
@@ -1138,25 +1128,31 @@ function makeLinkRow(row: LinkGroup, text: string, level: number, key: string, c
 }
 
 /**
+ * Makes the spot at the start of a sidebar row where its open arrow goes. The indent is part of it, so clicking left
+ * of the arrow opens the row instead of jumping.
+ * @param level How deep the row sits in the list.
+ * @returns The element, empty.
+ */
+function makeRowToggle(level: number): HTMLElement {
+	const toggle = makeElement('span', 'sidebar-toggle');
+	toggle.style.paddingLeft = (level * 16) + 'px';
+	return toggle;
+}
+
+/**
  * Makes a row for one place an import is written. Clicking it opens that file with the line selected.
  * @param line Where the import is.
  * @param level How deep it sits in the list, for its indent.
  * @returns The row.
  */
 function makeImportLineRow(line: ImportLine, level: number): HTMLElement {
-	const row = document.createElement('div');
-	row.className = 'sidebar-link sidebar-line';
+	const row = makeElement('div', 'sidebar-link sidebar-line');
 	row.title = 'Open ' + line.path + ' at line ' + line.lines.start;
 
 	// an empty spot where a toggle would be, so it lines up with the rows above
-	const toggle = document.createElement('span');
-	toggle.className = 'sidebar-toggle';
-	toggle.style.paddingLeft = (level * 16) + 'px';
-	row.appendChild(toggle);
+	row.appendChild(makeRowToggle(level));
 
-	const text = document.createElement('span');
-	text.className = 'sidebar-link-text';
-	text.textContent = line.label;
+	const text = makeElement('span', 'sidebar-link-text', line.label);
 	row.appendChild(text);
 
 	function open(): void {
@@ -1288,8 +1284,7 @@ const ARROW_MODES: { mode: ArrowMode; name: string; title: string }[] = [
  * @returns The element.
  */
 function makeDivider(): HTMLElement {
-	const divider = document.createElement('span');
-	divider.className = 'toolbar-divider';
+	const divider = makeElement('span', 'toolbar-divider');
 	return divider;
 }
 
@@ -1424,9 +1419,7 @@ function closePopupsOnEscape(event: KeyboardEvent): void {
  * @returns The element.
  */
 function makePopupHeading(text: string): HTMLElement {
-	const heading = document.createElement('div');
-	heading.className = 'popup-heading';
-	heading.textContent = text;
+	const heading = makeElement('div', 'popup-heading', text);
 	return heading;
 }
 
@@ -1437,14 +1430,11 @@ function makePopupHeading(text: string): HTMLElement {
  * @returns The row, and the element to put the control in.
  */
 function makePopupRow(label: string, title: string): { row: HTMLElement; control: HTMLElement } {
-	const row = document.createElement('div');
-	row.className = 'popup-row';
-	const name = document.createElement('span');
-	name.textContent = label;
+	const row = makeElement('div', 'popup-row');
+	const name = makeElement('span', '', label);
 	name.title = title;
 	row.appendChild(name);
-	const control = document.createElement('div');
-	control.className = 'popup-control';
+	const control = makeElement('div', 'popup-control');
 	row.appendChild(control);
 	return { row: row, control: control };
 }
@@ -1457,30 +1447,17 @@ function makePopupRow(label: string, title: string): { row: HTMLElement; control
 function drawToolbar(): void {
 	const toolbar = document.getElementById('toolbar')!;
 
-	const reset = document.createElement('button');
-	reset.className = 'icon-button';
-	reset.title = 'Reset layout';
-	reset.appendChild(makeResetIcon());
-	reset.addEventListener('click', handleToolbarReset);
+	const reset = makeIconButton(makeResetIcon(), 'Reset layout', handleToolbarReset);
 	toolbar.appendChild(reset);
 
-	const fit = document.createElement('button');
-	fit.className = 'icon-button';
-	fit.title = 'Fit to view';
-	fit.appendChild(makeFitIcon());
-	fit.addEventListener('click', fitToView);
+	const fit = makeIconButton(makeFitIcon(), 'Fit to view', fitToView);
 	toolbar.appendChild(fit);
 
 	// the arrow settings, behind one button: how strongly they draw, and how deep they go
 	toolbar.appendChild(makeDivider());
-	const arrowsAnchor = document.createElement('span');
-	arrowsAnchor.className = 'popup-anchor';
+	const arrowsAnchor = makeElement('span', 'popup-anchor');
 	toolbar.appendChild(arrowsAnchor);
-	const arrowsButton = document.createElement('button');
-	arrowsButton.className = 'icon-button';
-	arrowsButton.title = 'Arrows';
-	arrowsButton.appendChild(makeArrowsIcon());
-	arrowsButton.addEventListener('click', toggleArrowsPopup);
+	const arrowsButton = makeIconButton(makeArrowsIcon(), 'Arrows', toggleArrowsPopup);
 	arrowsAnchor.appendChild(arrowsButton);
 
 	const arrows = document.createElement('div');
@@ -1493,8 +1470,7 @@ function drawToolbar(): void {
 	const show = makePopupRow('Show', '');
 	arrows.appendChild(show.row);
 	for (const option of ARROW_MODES) {
-		const button = document.createElement('button');
-		button.className = 'text-button arrow-mode';
+		const button = makeElement('button', 'text-button arrow-mode');
 		button.dataset.mode = option.mode;
 		button.textContent = option.name;
 		button.title = option.title;
@@ -1521,9 +1497,7 @@ function drawToolbar(): void {
 	// the deepest level, dimmed beside the field
 	// the slash and the number are separate, so the row's gap spaces both sides of the slash evenly
 	depth.control.classList.add('depth-control');
-	const depthSlash = document.createElement('span');
-	depthSlash.className = 'arrow-depth-max';
-	depthSlash.textContent = '/';
+	const depthSlash = makeElement('span', 'arrow-depth-max', '/');
 	depth.control.appendChild(depthSlash);
 	const depthMax = document.createElement('span');
 	depthMax.id = 'arrow-depth-max';
@@ -1533,14 +1507,9 @@ function drawToolbar(): void {
 
 	// the settings button, last, with its popup hanging below it
 	toolbar.appendChild(makeDivider());
-	const settingsAnchor = document.createElement('span');
-	settingsAnchor.className = 'popup-anchor';
+	const settingsAnchor = makeElement('span', 'popup-anchor');
 	toolbar.appendChild(settingsAnchor);
-	const settingsButton = document.createElement('button');
-	settingsButton.className = 'icon-button';
-	settingsButton.title = 'Settings';
-	settingsButton.appendChild(makeSettingsIcon());
-	settingsButton.addEventListener('click', toggleSettings);
+	const settingsButton = makeIconButton(makeSettingsIcon(), 'Settings', toggleSettings);
 	settingsAnchor.appendChild(settingsButton);
 
 	const settings = document.createElement('div');
@@ -1552,11 +1521,9 @@ function drawToolbar(): void {
 	document.addEventListener('keydown', closePopupsOnEscape);
 
 	settings.appendChild(makePopupHeading('Language model'));
-	const modelRow = document.createElement('div');
-	modelRow.className = 'settings-row';
+	const modelRow = makeElement('div', 'settings-row');
 	settings.appendChild(modelRow);
-	const flowRow = document.createElement('div');
-	flowRow.className = 'settings-row';
+	const flowRow = makeElement('div', 'settings-row');
 	settings.appendChild(flowRow);
 
 	const modelSelect = document.createElement('select');
@@ -1564,59 +1531,104 @@ function drawToolbar(): void {
 	modelSelect.title = 'Language model for future AI flow generation';
 	modelSelect.setAttribute('aria-label', 'Language model');
 	modelSelect.disabled = true;
-	const placeholder = document.createElement('option');
-	placeholder.value = '';
-	placeholder.textContent = 'Choose model';
-	modelSelect.appendChild(placeholder);
-	modelSelect.addEventListener('change', () => {
-		const model = availableModels.find((item) => modelKey(item) === modelSelect.value);
-		modelIsAvailable = model !== undefined;
-		(document.getElementById('generate-flows') as HTMLButtonElement).disabled = !modelIsAvailable;
-		vscode.postMessage({ type: 'selectModel', model: model });
-	});
+	modelSelect.appendChild(makeModelPlaceholder());
+	modelSelect.addEventListener('change', handleModelChange);
 	modelRow.appendChild(modelSelect);
 
-	const findModels = document.createElement('button');
-	findModels.className = 'text-button';
+	const findModels = makeElement('button', 'text-button', 'Find models');
 	findModels.id = 'find-models';
-	findModels.textContent = 'Find models';
 	findModels.title = 'Load language models available to VS Code';
-	findModels.addEventListener('click', () => {
-		findModels.disabled = true;
-		findModels.textContent = 'Loading…';
-		modelStatus.textContent = '';
-		vscode.postMessage({ type: 'discoverModels' });
-	});
+	findModels.addEventListener('click', handleFindModelsClick);
 	modelRow.appendChild(findModels);
 
-	modelStatus = document.createElement('span');
+	modelStatus = makeElement('span');
 	modelStatus.id = 'model-status';
 	modelStatus.setAttribute('role', 'status');
 	settings.insertBefore(modelStatus, flowRow);
 
-	const generate = document.createElement('button');
-	generate.className = 'text-button';
+	const generate = makeElement('button', 'text-button', 'Generate flows');
 	generate.id = 'generate-flows';
-	generate.textContent = 'Generate flows';
 	generate.title = 'Ask the selected language model to find example repository flows';
 	generate.disabled = true;
-	generate.addEventListener('click', () => {
-		const selected = availableModels.find((item) => modelKey(item) === modelSelect.value);
-		generate.disabled = true;
-		generate.textContent = 'Generating…';
-		showFlowResults([], 'Analyzing repository with the selected model…', true);
-		vscode.postMessage({ type: 'generateFlows', model: selected });
-	});
+	generate.addEventListener('click', handleGenerateClick);
 	flowRow.appendChild(generate);
 }
 
+// the language models the extension found, whether the one chosen is among them, and where the settings say so
 let availableModels: ModelOption[] = [];
 let modelIsAvailable = false;
+let modelStatus: HTMLElement;
 
-function modelKey(model: ModelOption): string {
-	return model.vendor + '\u0000' + model.id;
+/**
+ * Finds a model the extension found, by its key.
+ * @param key A key from modelKey, like the model list's values.
+ * @returns The model, or undefined if it wasn't found.
+ */
+function findModel(key: string): ModelOption | undefined {
+	return availableModels.find(function hasKey(model: ModelOption): boolean {
+		return modelKey(model) === key;
+	});
 }
 
+/**
+ * Turns the Generate flows button on only while the chosen model is available.
+ */
+function updateGenerateButton(): void {
+	(document.getElementById('generate-flows') as HTMLButtonElement).disabled = !modelIsAvailable;
+}
+
+/**
+ * Makes the model list's first entry, which asks for a choice.
+ * @returns The option.
+ */
+function makeModelPlaceholder(): HTMLOptionElement {
+	const placeholder = makeElement('option', '', 'Choose model');
+	placeholder.value = '';
+	return placeholder;
+}
+
+/**
+ * Remembers the model picked from the list.
+ * @param event The browser's change event, on the list.
+ */
+function handleModelChange(event: Event): void {
+	const model = findModel((event.currentTarget as HTMLSelectElement).value);
+	modelIsAvailable = model !== undefined;
+	updateGenerateButton();
+	vscode.postMessage({ type: 'selectModel', model: model });
+}
+
+/**
+ * Asks the extension for the language models it can use.
+ * @param event The browser's mouse event, on the Find models button.
+ */
+function handleFindModelsClick(event: MouseEvent): void {
+	const button = event.currentTarget as HTMLButtonElement;
+	button.disabled = true;
+	button.textContent = 'Loading…';
+	modelStatus.textContent = '';
+	vscode.postMessage({ type: 'discoverModels' });
+}
+
+/**
+ * Asks the extension to generate flows with the chosen model, showing that it's working.
+ * @param event The browser's mouse event, on the Generate flows button.
+ */
+function handleGenerateClick(event: MouseEvent): void {
+	const selected = findModel((document.getElementById('model-select') as HTMLSelectElement).value);
+	const button = event.currentTarget as HTMLButtonElement;
+	button.disabled = true;
+	button.textContent = 'Generating…';
+	showFlowResults([], 'Analyzing repository with the selected model…', true);
+	vscode.postMessage({ type: 'generateFlows', model: selected });
+}
+
+/**
+ * Fills the model list with the models the extension found, keeping the chosen one even if it's no longer available.
+ * @param models The models found.
+ * @param selected The model chosen before, if any.
+ * @param status A message to show under the list; by default, which model is chosen.
+ */
 function showModels(models: ModelOption[], selected: ModelOption | undefined, status?: string): void {
 	availableModels = models;
 	const select = document.getElementById('model-select') as HTMLSelectElement;
@@ -1624,88 +1636,93 @@ function showModels(models: ModelOption[], selected: ModelOption | undefined, st
 	modelStatus.textContent = status ?? (selected ? 'Selected: ' + selected.name : '');
 	find.disabled = false;
 	find.textContent = 'Find models';
-	select.replaceChildren();
-	const placeholder = document.createElement('option');
-	placeholder.value = '';
-	placeholder.textContent = 'Choose model';
-	select.appendChild(placeholder);
+
+	select.replaceChildren(makeModelPlaceholder());
 	for (const model of models) {
-		const option = document.createElement('option');
+		const option = makeElement('option', '', model.name + ' (' + model.vendor + ')');
 		option.value = modelKey(model);
-		option.textContent = model.name + ' (' + model.vendor + ')';
 		select.appendChild(option);
 	}
-	if (selected && !models.some((model) => modelKey(model) === modelKey(selected))) {
-		const unavailable = document.createElement('option');
+	const isFound = selected !== undefined && findModel(modelKey(selected)) !== undefined;
+	if (selected !== undefined && !isFound) {
+		const unavailable = makeElement('option', '', selected.name + ' (currently unavailable)');
 		unavailable.value = modelKey(selected);
-		unavailable.textContent = selected.name + ' (currently unavailable)';
 		select.appendChild(unavailable);
 	}
 	select.value = selected ? modelKey(selected) : '';
 	select.disabled = models.length === 0;
-	modelIsAvailable = selected !== undefined && models.some((model) => modelKey(model) === modelKey(selected));
-	(document.getElementById('generate-flows') as HTMLButtonElement).disabled = !modelIsAvailable;
+	modelIsAvailable = isFound;
+	updateGenerateButton();
 }
 
-let modelStatus: HTMLElement;
-
+/**
+ * Shows the flows the model found, each with its steps; clicking a flow opens it in its own panel, and clicking a step's
+ * file opens the file.
+ * @param flows The flows.
+ * @param status A message to show above them, if any.
+ * @param loading True while the model is still working, so Generate flows stays off.
+ */
 function showFlowResults(flows: FlowScenario[], status?: string, loading = false): void {
 	const panel = document.getElementById('flow-results')!;
 	panel.replaceChildren();
-	const header = document.createElement('div');
-	header.className = 'flow-results-header';
-	const title = document.createElement('strong');
-	title.textContent = 'Example flows';
-	header.appendChild(title);
-	const close = document.createElement('button');
-	close.className = 'icon-button';
-	close.textContent = '×';
+
+	const header = makeElement('div', 'flow-results-header');
+	header.appendChild(makeElement('strong', '', 'Example flows'));
+	const close = makeElement('button', 'icon-button', '×');
 	close.title = 'Close flow results';
 	close.setAttribute('aria-label', close.title);
-	close.addEventListener('click', () => panel.classList.remove('visible'));
+	function hide(): void {
+		panel.classList.remove('visible');
+	}
+	close.addEventListener('click', hide);
 	header.appendChild(close);
 	panel.appendChild(header);
+
 	if (status) {
-		const message = document.createElement('div');
-		message.className = 'flow-status';
-		message.textContent = status;
-		panel.appendChild(message);
+		panel.appendChild(makeElement('div', 'flow-status', status));
 	}
 	for (const flow of flows) {
-		const card = document.createElement('section');
-		card.className = 'flow-card';
-		const titleButton = document.createElement('button');
-		titleButton.className = 'flow-title-button';
-		titleButton.textContent = flow.title;
-		titleButton.title = 'Open this flow in a new tab';
-		titleButton.addEventListener('click', () => vscode.postMessage({ type: 'openFlow', flow: flow }));
-		card.appendChild(titleButton);
-		const summary = document.createElement('p');
-		summary.textContent = flow.summary;
-		card.appendChild(summary);
-		const steps = document.createElement('ol');
-		for (const step of flow.steps) {
-			const row = document.createElement('li');
-			const action = document.createElement('span');
-			action.textContent = step.action + ' ';
-			row.appendChild(action);
-			const open = document.createElement('button');
-			open.className = 'flow-path-button';
-			open.textContent = step.nodeId;
-			open.title = 'Open ' + step.nodeId;
-			open.addEventListener('click', () => vscode.postMessage({ type: 'open', path: step.nodeId, kind: 'file' }));
-			row.appendChild(open);
-			steps.appendChild(row);
-		}
-		card.appendChild(steps);
-		panel.appendChild(card);
+		panel.appendChild(makeFlowCard(flow));
 	}
 	panel.classList.add('visible');
-	const generate = document.getElementById('generate-flows') as HTMLButtonElement;
+
 	if (!loading) {
-		generate.disabled = !modelIsAvailable;
-		generate.textContent = 'Generate flows';
+		updateGenerateButton();
+		(document.getElementById('generate-flows') as HTMLButtonElement).textContent = 'Generate flows';
 	}
+}
+
+/**
+ * Makes one flow in the results: its title, which opens it, its summary, and its steps, each with its file.
+ * @param flow The flow.
+ * @returns The element.
+ */
+function makeFlowCard(flow: FlowScenario): HTMLElement {
+	const card = makeElement('section', 'flow-card');
+	const titleButton = makeElement('button', 'flow-title-button', flow.title);
+	titleButton.title = 'Open this flow in a new tab';
+	function openFlow(): void {
+		vscode.postMessage({ type: 'openFlow', flow: flow });
+	}
+	titleButton.addEventListener('click', openFlow);
+	card.appendChild(titleButton);
+	card.appendChild(makeElement('p', '', flow.summary));
+
+	const steps = makeElement('ol');
+	for (const step of flow.steps) {
+		const row = makeElement('li');
+		row.appendChild(makeElement('span', '', step.action + ' '));
+		const open = makeElement('button', 'flow-path-button', step.nodeId);
+		open.title = 'Open ' + step.nodeId;
+		function openFile(): void {
+			vscode.postMessage({ type: 'open', path: step.nodeId, kind: 'file' });
+		}
+		open.addEventListener('click', openFile);
+		row.appendChild(open);
+		steps.appendChild(row);
+	}
+	card.appendChild(steps);
+	return card;
 }
 
 /**

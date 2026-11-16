@@ -61,7 +61,21 @@ async function main() {
 		],
 	});
 
-	const contexts = [extensionContext, webviewContext];
+	// the graph view's styles, loaded from their own file
+	const styleContext = await esbuild.context({
+		entryPoints: [
+			'src/webview/graph.css'
+		],
+		bundle: true,
+		minify: production,
+		outfile: 'dist/webview.css',
+		logLevel: 'silent',
+		plugins: [
+			esbuildProblemMatcherPlugin,
+		],
+	});
+
+	const contexts = [extensionContext, webviewContext, styleContext];
 	for (const ctx of contexts) {
 		if (watch) {
 			await ctx.watch();
