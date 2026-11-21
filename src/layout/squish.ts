@@ -13,14 +13,14 @@ const ROUNDING = 0.000001;
  * @returns True if they share a row.
  */
 function sameRow(a: Rect, b: Rect): boolean {
-	return a.y < b.y + b.height && b.y < a.y + a.height;
+    return a.y < b.y + b.height && b.y < a.y + a.height;
 }
 
 // a stretch of the x-axis covered by one or more of a row's boxes, with nothing between them sideways
 interface Stretch {
-	start: number;
-	end: number;
-	ids: string[];
+    start: number;
+    end: number;
+    ids: string[];
 }
 
 /**
@@ -31,32 +31,32 @@ interface Stretch {
  * @returns The covered stretches, left to right. The empty space between them is what can shrink.
  */
 function stretchesOf(row: string[], rects: Map<string, Rect>): Stretch[] {
-	function compareLeftFirst(a: string, b: string): number {
-		return rects.get(a)!.x - rects.get(b)!.x;
-	}
+    function compareLeftFirst(a: string, b: string): number {
+        return rects.get(a)!.x - rects.get(b)!.x;
+    }
 
-	const stretches: Stretch[] = [];
-	for (const id of row.toSorted(compareLeftFirst)) {
-		const rect = rects.get(id)!;
-		const last = stretches[stretches.length - 1];
-		if (last !== undefined && rect.x < last.end) {
-			// overlaps the stretch so far sideways: same stretch
-			last.end = Math.max(last.end, rect.x + rect.width);
-			last.ids.push(id);
-		} else {
-			stretches.push({ start: rect.x, end: rect.x + rect.width, ids: [id] });
-		}
-	}
-	return stretches;
+    const stretches: Stretch[] = [];
+    for (const id of row.toSorted(compareLeftFirst)) {
+        const rect = rects.get(id)!;
+        const last = stretches[stretches.length - 1];
+        if (last !== undefined && rect.x < last.end) {
+            // overlaps the stretch so far sideways: same stretch
+            last.end = Math.max(last.end, rect.x + rect.width);
+            last.ids.push(id);
+        } else {
+            stretches.push({ start: rect.x, end: rect.x + rect.width, ids: [id] });
+        }
+    }
+    return stretches;
 }
 
 // a row measured for packing: its stretches, the space before each now, and the least each space can shrink to
 interface MeasuredRow {
-	stretches: Stretch[];
-	spaces: number[];
-	minSpaces: number[];
-	width: number; // from the inside's left edge to the end of the last stretch, as the row is now
-	tightWidth: number; // the same, packed as tight as it goes
+    stretches: Stretch[];
+    spaces: number[];
+    minSpaces: number[];
+    width: number; // from the inside's left edge to the end of the last stretch, as the row is now
+    tightWidth: number; // the same, packed as tight as it goes
 }
 
 /**
@@ -67,20 +67,20 @@ interface MeasuredRow {
  * @returns Its stretches, spaces, and widths.
  */
 function measureRow(row: string[], rects: Map<string, Rect>): MeasuredRow {
-	const stretches = stretchesOf(row, rects);
-	const spaces: number[] = [];
-	const minSpaces: number[] = [];
-	let tightWidth = 0;
-	let end = 0;
-	for (let i = 0; i < stretches.length; i++) {
-		const space = stretches[i].start - end;
-		const minSpace = Math.min(space, i === 0 ? 0 : MIN_GAP);
-		spaces.push(space);
-		minSpaces.push(minSpace);
-		tightWidth += minSpace + stretches[i].end - stretches[i].start;
-		end = stretches[i].end;
-	}
-	return { stretches: stretches, spaces: spaces, minSpaces: minSpaces, width: end, tightWidth: tightWidth };
+    const stretches = stretchesOf(row, rects);
+    const spaces: number[] = [];
+    const minSpaces: number[] = [];
+    let tightWidth = 0;
+    let end = 0;
+    for (let i = 0; i < stretches.length; i++) {
+        const space = stretches[i].start - end;
+        const minSpace = Math.min(space, i === 0 ? 0 : MIN_GAP);
+        spaces.push(space);
+        minSpaces.push(minSpace);
+        tightWidth += minSpace + stretches[i].end - stretches[i].start;
+        end = stretches[i].end;
+    }
+    return { stretches: stretches, spaces: spaces, minSpaces: minSpaces, width: end, tightWidth: tightWidth };
 }
 
 /**
@@ -93,28 +93,28 @@ function measureRow(row: string[], rects: Map<string, Rect>): MeasuredRow {
  * @returns The row's new rects, and whether it fit. When it can't, the boxes are placed with the smallest spaces.
  */
 function packRow(row: string[], rects: Map<string, Rect>, width: number): { placed: Map<string, Rect>; fits: boolean } {
-	const measured = measureRow(row, rects);
+    const measured = measureRow(row, rects);
 
-	// how much of each space's spare room is kept: 1 leaves the row as it is, 0 packs it as tight as it goes
-	let keep = 1;
-	if (measured.width > width + ROUNDING) {
-		const spare = measured.width - measured.tightWidth;
-		keep = spare > 0 ? Math.max(0, (width - measured.tightWidth) / spare) : 0;
-	}
+    // how much of each space's spare room is kept: 1 leaves the row as it is, 0 packs it as tight as it goes
+    let keep = 1;
+    if (measured.width > width + ROUNDING) {
+        const spare = measured.width - measured.tightWidth;
+        keep = spare > 0 ? Math.max(0, (width - measured.tightWidth) / spare) : 0;
+    }
 
-	// each stretch moves as one, so its boxes keep their offsets from each other
-	const placed = new Map<string, Rect>();
-	let x = 0;
-	for (let i = 0; i < measured.stretches.length; i++) {
-		const stretch = measured.stretches[i];
-		x += measured.minSpaces[i] + (measured.spaces[i] - measured.minSpaces[i]) * keep;
-		for (const id of stretch.ids) {
-			const rect = rects.get(id)!;
-			placed.set(id, { x: x + rect.x - stretch.start, y: rect.y, width: rect.width, height: rect.height });
-		}
-		x += stretch.end - stretch.start;
-	}
-	return { placed: placed, fits: measured.tightWidth <= width + ROUNDING };
+    // each stretch moves as one, so its boxes keep their offsets from each other
+    const placed = new Map<string, Rect>();
+    let x = 0;
+    for (let i = 0; i < measured.stretches.length; i++) {
+        const stretch = measured.stretches[i];
+        x += measured.minSpaces[i] + (measured.spaces[i] - measured.minSpaces[i]) * keep;
+        for (const id of stretch.ids) {
+            const rect = rects.get(id)!;
+            placed.set(id, { x: x + rect.x - stretch.start, y: rect.y, width: rect.width, height: rect.height });
+        }
+        x += stretch.end - stretch.start;
+    }
+    return { placed: placed, fits: measured.tightWidth <= width + ROUNDING };
 }
 
 /**
@@ -124,16 +124,16 @@ function packRow(row: string[], rects: Map<string, Rect>, width: number): { plac
  * @returns The ids in its row, itself included.
  */
 function rowOf(rects: Map<string, Rect>, id: string): string[] {
-	const row = [id];
-	for (let i = 0; i < row.length; i++) {
-		const current = rects.get(row[i])!;
-		for (const [otherId, other] of rects) {
-			if (!row.includes(otherId) && sameRow(current, other)) {
-				row.push(otherId);
-			}
-		}
-	}
-	return row;
+    const row = [id];
+    for (let i = 0; i < row.length; i++) {
+        const current = rects.get(row[i])!;
+        for (const [otherId, other] of rects) {
+            if (!row.includes(otherId) && sameRow(current, other)) {
+                row.push(otherId);
+            }
+        }
+    }
+    return row;
 }
 
 /**
@@ -142,19 +142,19 @@ function rowOf(rects: Map<string, Rect>, id: string): string[] {
  * @returns Each row's ids.
  */
 function rowsOf(rects: Map<string, Rect>): string[][] {
-	const rows: string[][] = [];
-	const done = new Set<string>();
-	for (const id of rects.keys()) {
-		if (done.has(id)) {
-			continue;
-		}
-		const row = rowOf(rects, id);
-		for (const member of row) {
-			done.add(member);
-		}
-		rows.push(row);
-	}
-	return rows;
+    const rows: string[][] = [];
+    const done = new Set<string>();
+    for (const id of rects.keys()) {
+        if (done.has(id)) {
+            continue;
+        }
+        const row = rowOf(rects, id);
+        for (const member of row) {
+            done.add(member);
+        }
+        rows.push(row);
+    }
+    return rows;
 }
 
 /**
@@ -164,16 +164,16 @@ function rowsOf(rects: Map<string, Rect>): string[][] {
  * @returns The children's new rects, and whether every row fit. One that doesn't is packed as tight as it goes.
  */
 export function squishHorizontally(rects: Map<string, Rect>, width: number): { rects: Map<string, Rect>; fits: boolean } {
-	const placed = new Map<string, Rect>();
-	let fits = true;
-	for (const row of rowsOf(rects)) {
-		const packed = packRow(row, rects, width);
-		for (const [id, rect] of packed.placed) {
-			placed.set(id, rect);
-		}
-		fits = fits && packed.fits;
-	}
-	return { rects: placed, fits: fits };
+    const placed = new Map<string, Rect>();
+    let fits = true;
+    for (const row of rowsOf(rects)) {
+        const packed = packRow(row, rects, width);
+        for (const [id, rect] of packed.placed) {
+            placed.set(id, rect);
+        }
+        fits = fits && packed.fits;
+    }
+    return { rects: placed, fits: fits };
 }
 
 /**
@@ -182,11 +182,11 @@ export function squishHorizontally(rects: Map<string, Rect>, width: number): { r
  * @returns The smallest width every row fits in, from the inside's left edge.
  */
 export function tightWidth(rects: Map<string, Rect>): number {
-	let widest = 0;
-	for (const row of rowsOf(rects)) {
-		widest = Math.max(widest, measureRow(row, rects).tightWidth);
-	}
-	return widest;
+    let widest = 0;
+    for (const row of rowsOf(rects)) {
+        widest = Math.max(widest, measureRow(row, rects).tightWidth);
+    }
+    return widest;
 }
 
 /**
@@ -195,11 +195,11 @@ export function tightWidth(rects: Map<string, Rect>): number {
  * @returns New rects with x and y, and width and height, swapped. Doing it twice gives back the original.
  */
 function transpose(rects: Map<string, Rect>): Map<string, Rect> {
-	const swapped = new Map<string, Rect>();
-	for (const [id, rect] of rects) {
-		swapped.set(id, { x: rect.y, y: rect.x, width: rect.height, height: rect.width });
-	}
-	return swapped;
+    const swapped = new Map<string, Rect>();
+    for (const [id, rect] of rects) {
+        swapped.set(id, { x: rect.y, y: rect.x, width: rect.height, height: rect.width });
+    }
+    return swapped;
 }
 
 /**
@@ -210,8 +210,8 @@ function transpose(rects: Map<string, Rect>): Map<string, Rect> {
  * @returns The children's new rects, and whether every column fit.
  */
 export function squishVertically(rects: Map<string, Rect>, height: number): { rects: Map<string, Rect>; fits: boolean } {
-	const squished = squishHorizontally(transpose(rects), height);
-	return { rects: transpose(squished.rects), fits: squished.fits };
+    const squished = squishHorizontally(transpose(rects), height);
+    return { rects: transpose(squished.rects), fits: squished.fits };
 }
 
 /**
@@ -220,5 +220,5 @@ export function squishVertically(rects: Map<string, Rect>, height: number): { re
  * @returns The smallest height every column fits in, from the inside's top edge.
  */
 export function tightHeight(rects: Map<string, Rect>): number {
-	return tightWidth(transpose(rects));
+    return tightWidth(transpose(rects));
 }

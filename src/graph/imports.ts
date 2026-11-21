@@ -6,8 +6,8 @@ export const CODE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.
 
 // an import path, and the lines it's written on
 export interface FoundImport {
-	path: string;
-	lines: LineRange;
+    path: string;
+    lines: LineRange;
 }
 
 /**
@@ -18,23 +18,25 @@ export interface FoundImport {
  * @returns The imports, in the order they're written.
  */
 export function scanImports(source: string): FoundImport[] {
-	const readImports = true;
-	const detectJavaScriptImports = true;
-	const fileInfo = ts.preProcessFile(source, readImports, detectJavaScriptImports);
+    const readImports = true;
+    const detectJavaScriptImports = true;
+    const fileInfo = ts.preProcessFile(source, readImports, detectJavaScriptImports);
 
-	// in the order they're written, so the line breaks before each are counted in one pass through the text
-	const references = fileInfo.importedFiles.toSorted((a, b) => a.pos - b.pos);
-	const found: FoundImport[] = [];
-	let line = 1;
-	let counted = 0;
-	for (const reference of references) {
-		for (let i = counted; i < reference.pos; i++) {
-			if (source[i] === '\n') {
-				line++;
-			}
-		}
-		counted = reference.pos;
-		found.push({ path: reference.fileName, lines: { start: line, end: line } });
-	}
-	return found;
+    // in the order they're written, so the line breaks before each are counted in one pass through the text
+    const references = fileInfo.importedFiles.toSorted(function byPosition(a: ts.FileReference, b: ts.FileReference): number {
+        return a.pos - b.pos;
+    });
+    const found: FoundImport[] = [];
+    let line = 1;
+    let counted = 0;
+    for (const reference of references) {
+        for (let i = counted; i < reference.pos; i++) {
+            if (source[i] === '\n') {
+                line++;
+            }
+        }
+        counted = reference.pos;
+        found.push({ path: reference.fileName, lines: { start: line, end: line } });
+    }
+    return found;
 }

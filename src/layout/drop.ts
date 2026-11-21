@@ -17,12 +17,12 @@ type Direction = 'left' | 'right' | 'up' | 'down';
  * @returns Along whichever axis their centers are further apart, the side the other box is already on.
  */
 function directionAway(pusher: Rect, other: Rect): Direction {
-	const dx = (other.x + other.width / 2) - (pusher.x + pusher.width / 2);
-	const dy = (other.y + other.height / 2) - (pusher.y + pusher.height / 2);
-	if (Math.abs(dx) >= Math.abs(dy)) {
-		return dx >= 0 ? 'right' : 'left';
-	}
-	return dy >= 0 ? 'down' : 'up';
+    const dx = (other.x + other.width / 2) - (pusher.x + pusher.width / 2);
+    const dy = (other.y + other.height / 2) - (pusher.y + pusher.height / 2);
+    if (Math.abs(dx) >= Math.abs(dy)) {
+        return dx >= 0 ? 'right' : 'left';
+    }
+    return dy >= 0 ? 'down' : 'up';
 }
 
 /**
@@ -33,9 +33,9 @@ function directionAway(pusher: Rect, other: Rect): Direction {
  * @returns 'right' or 'down'. Ties go right, the way the layout flows.
  */
 function shorterOfRightAndDown(pusher: Rect, other: Rect): Direction {
-	const right = pusher.x + pusher.width + GAP - other.x;
-	const down = pusher.y + pusher.height + GAP - other.y;
-	return right <= down ? 'right' : 'down';
+    const right = pusher.x + pusher.width + GAP - other.x;
+    const down = pusher.y + pusher.height + GAP - other.y;
+    return right <= down ? 'right' : 'down';
 }
 
 /**
@@ -45,15 +45,15 @@ function shorterOfRightAndDown(pusher: Rect, other: Rect): Direction {
  * @param direction Which way to push it.
  */
 function pushClear(pusher: Rect, other: Rect, direction: Direction): void {
-	if (direction === 'right') {
-		other.x = pusher.x + pusher.width + GAP;
-	} else if (direction === 'left') {
-		other.x = pusher.x - GAP - other.width;
-	} else if (direction === 'down') {
-		other.y = pusher.y + pusher.height + GAP;
-	} else {
-		other.y = pusher.y - GAP - other.height;
-	}
+    if (direction === 'right') {
+        other.x = pusher.x + pusher.width + GAP;
+    } else if (direction === 'left') {
+        other.x = pusher.x - GAP - other.width;
+    } else if (direction === 'down') {
+        other.y = pusher.y + pusher.height + GAP;
+    } else {
+        other.y = pusher.y - GAP - other.height;
+    }
 }
 
 /**
@@ -66,40 +66,40 @@ function pushClear(pusher: Rect, other: Rect, direction: Direction): void {
  * @returns New rects for every sibling, after the pushes.
  */
 function runChain(rects: Map<string, Rect>, droppedId: string, onlyRightOrDown: boolean): Map<string, Rect> {
-	// copies, so the caller's rects stay as they were for comparing
-	const placed = new Map<string, Rect>();
-	for (const [id, rect] of rects) {
-		placed.set(id, { x: rect.x, y: rect.y, width: rect.width, height: rect.height });
-	}
+    // copies, so the caller's rects stay as they were for comparing
+    const placed = new Map<string, Rect>();
+    for (const [id, rect] of rects) {
+        placed.set(id, { x: rect.x, y: rect.y, width: rect.width, height: rect.height });
+    }
 
-	// boxes whose overlaps still need checking, starting with the dropped one, and the way each was pushed
-	const pushers = [droppedId];
-	const pushedWay = new Map<string, Direction>();
-	let steps = 0;
-	while (pushers.length > 0 && steps < MAX_STEPS) {
-		steps++;
-		const pusherId = pushers.shift()!;
-		const pusher = placed.get(pusherId)!;
+    // boxes whose overlaps still need checking, starting with the dropped one, and the way each was pushed
+    const pushers = [droppedId];
+    const pushedWay = new Map<string, Direction>();
+    let steps = 0;
+    while (pushers.length > 0 && steps < MAX_STEPS) {
+        steps++;
+        const pusherId = pushers.shift()!;
+        const pusher = placed.get(pusherId)!;
 
-		for (const [id, other] of placed) {
-			if (id === pusherId || id === droppedId || !overlapsWithGap(pusher, other, MIN_GAP)) {
-				continue;
-			}
+        for (const [id, other] of placed) {
+            if (id === pusherId || id === droppedId || !overlapsWithGap(pusher, other, MIN_GAP)) {
+                continue;
+            }
 
-			// the dropped box pushes each away from itself; anything else passes its own push on
-			let direction = pushedWay.get(pusherId);
-			if (direction === undefined) {
-				direction = onlyRightOrDown ? shorterOfRightAndDown(pusher, other) : directionAway(pusher, other);
-			}
-			pushClear(pusher, other, direction);
-			pushedWay.set(id, direction);
+            // the dropped box pushes each away from itself; anything else passes its own push on
+            let direction = pushedWay.get(pusherId);
+            if (direction === undefined) {
+                direction = onlyRightOrDown ? shorterOfRightAndDown(pusher, other) : directionAway(pusher, other);
+            }
+            pushClear(pusher, other, direction);
+            pushedWay.set(id, direction);
 
-			// it moved, so it may now overlap others in turn
-			pushers.push(id);
-		}
-	}
+            // it moved, so it may now overlap others in turn
+            pushers.push(id);
+        }
+    }
 
-	return placed;
+    return placed;
 }
 
 /**
@@ -108,12 +108,12 @@ function runChain(rects: Map<string, Rect>, droppedId: string, onlyRightOrDown: 
  * @returns True if any starts left of or above 0.
  */
 function anyPastEdge(rects: Map<string, Rect>): boolean {
-	for (const rect of rects.values()) {
-		if (rect.x < 0 || rect.y < 0) {
-			return true;
-		}
-	}
-	return false;
+    for (const rect of rects.values()) {
+        if (rect.x < 0 || rect.y < 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /**
@@ -126,32 +126,32 @@ function anyPastEdge(rects: Map<string, Rect>): boolean {
  * @param droppedId The box that was just dropped.
  */
 export function settleDrop(state: LayoutState, info: GraphInfo, droppedId: string): void {
-	const parentId = info.nodesById.get(droppedId)!.parent!;
+    const parentId = info.nodesById.get(droppedId)!.parent!;
 
-	// every placed sibling, on every page, so open boxes count at the size they're showing
-	const before = placedChildRects(state, info, parentId);
+    // every placed sibling, on every page, so open boxes count at the size they're showing
+    const before = placedChildRects(state, info, parentId);
 
-	let after = runChain(before, droppedId, false);
-	if (anyPastEdge(after)) {
-		after = runChain(before, droppedId, true);
-	}
+    let after = runChain(before, droppedId, false);
+    if (anyPastEdge(after)) {
+        after = runChain(before, droppedId, true);
+    }
 
-	// each pushed box's home moves by as much as the box did
-	for (const [id, rect] of after) {
-		const old = before.get(id)!;
-		const dx = rect.x - old.x;
-		const dy = rect.y - old.y;
-		if (dx !== 0 || dy !== 0) {
-			const home = state.homes.get(id)!;
-			state.homes.set(id, { x: home.x + dx, y: home.y + dy });
-		}
-	}
+    // each pushed box's home moves by as much as the box did
+    for (const [id, rect] of after) {
+        const old = before.get(id)!;
+        const dx = rect.x - old.x;
+        const dy = rect.y - old.y;
+        if (dx !== 0 || dy !== 0) {
+            const home = state.homes.get(id)!;
+            state.homes.set(id, { x: home.x + dx, y: home.y + dy });
+        }
+    }
 
-	// a box pushed left or up past where the page is drawn from would be drawn outside the directory
-	keepPageAroundBoxes(state, info, parentId);
+    // a box pushed left or up past where the page is drawn from would be drawn outside the directory
+    keepPageAroundBoxes(state, info, parentId);
 
-	// a drop never hides a box: directories the user sized too small for what's in them now grow to fit
-	growToFit(state, info, droppedId);
+    // a drop never hides a box: directories the user sized too small for what's in them now grow to fit
+    growToFit(state, info, droppedId);
 }
 
 /**
@@ -164,11 +164,11 @@ export function settleDrop(state: LayoutState, info: GraphInfo, droppedId: strin
  * @param target Where it was let go, relative to the inside of its parent.
  */
 export function dropAt(state: LayoutState, info: GraphInfo, id: string, target: Position): void {
-	function drop(): void {
-		moveTo(state, info, id, target);
-		settleDrop(state, info, id);
-	}
-	changeSize(state, info, id, drop);
+    function drop(): void {
+        moveTo(state, info, id, target);
+        settleDrop(state, info, id);
+    }
+    changeSize(state, info, id, drop);
 }
 
 /**
@@ -180,9 +180,9 @@ export function dropAt(state: LayoutState, info: GraphInfo, id: string, target: 
  * @param target Where it is now, relative to the inside of its parent.
  */
 export function dragTo(state: LayoutState, info: GraphInfo, id: string, target: Position): void {
-	function move(): void {
-		moveTo(state, info, id, target);
-		growToFit(state, info, id);
-	}
-	changeSize(state, info, id, move);
+    function move(): void {
+        moveTo(state, info, id, target);
+        growToFit(state, info, id);
+    }
+    changeSize(state, info, id, move);
 }

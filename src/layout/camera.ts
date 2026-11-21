@@ -6,9 +6,9 @@ export const MAX_SCALE = 3;
 
 // how the world is shown on screen: shifted by x and y pixels, then magnified by scale
 export interface Camera {
-	x: number;
-	y: number;
-	scale: number;
+    x: number;
+    y: number;
+    scale: number;
 }
 
 /**
@@ -19,18 +19,18 @@ export interface Camera {
  * @returns The new camera. The scale stays between MIN_SCALE and MAX_SCALE.
  */
 export function zoomAt(camera: Camera, pointer: Position, factor: number): Camera {
-	// the world point under the mouse right now
-	const worldX = (pointer.x - camera.x) / camera.scale;
-	const worldY = (pointer.y - camera.y) / camera.scale;
+    // the world point under the mouse right now
+    const worldX = (pointer.x - camera.x) / camera.scale;
+    const worldY = (pointer.y - camera.y) / camera.scale;
 
-	const scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, camera.scale * factor));
+    const scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, camera.scale * factor));
 
-	// shift so that same world point lands back under the mouse
-	return {
-		x: pointer.x - worldX * scale,
-		y: pointer.y - worldY * scale,
-		scale: scale,
-	};
+    // shift so that same world point lands back under the mouse
+    return {
+        x: pointer.x - worldX * scale,
+        y: pointer.y - worldY * scale,
+        scale: scale,
+    };
 }
 
 /**
@@ -41,22 +41,22 @@ export function zoomAt(camera: Camera, pointer: Position, factor: number): Camer
  * @returns The camera. It zooms out as far as needed (down to MIN_SCALE) but never in past 1.
  */
 export function fitCamera(content: Rect, viewport: Rect, margin: number): Camera {
-	const availableWidth = viewport.width - 2 * margin;
-	const availableHeight = viewport.height - 2 * margin;
+    const availableWidth = viewport.width - 2 * margin;
+    const availableHeight = viewport.height - 2 * margin;
 
-	// the smaller ratio, so the content fits both ways; never enlarged, since a small graph is fine at full size
-	const fittingScale = Math.min(availableWidth / content.width, availableHeight / content.height);
-	const scale = Math.min(1, Math.max(MIN_SCALE, fittingScale));
+    // the smaller ratio, so the content fits both ways; never enlarged, since a small graph is fine at full size
+    const fittingScale = Math.min(availableWidth / content.width, availableHeight / content.height);
+    const scale = Math.min(1, Math.max(MIN_SCALE, fittingScale));
 
-	// put the content's center at the viewport's center
-	const contentCenterX = content.x + content.width / 2;
-	const contentCenterY = content.y + content.height / 2;
-	const viewportCenterX = viewport.x + viewport.width / 2;
-	const viewportCenterY = viewport.y + viewport.height / 2;
+    // put the content's center at the viewport's center
+    const contentCenterX = content.x + content.width / 2;
+    const contentCenterY = content.y + content.height / 2;
+    const viewportCenterX = viewport.x + viewport.width / 2;
+    const viewportCenterY = viewport.y + viewport.height / 2;
 
-	return {
-		x: viewportCenterX - contentCenterX * scale,
-		y: viewportCenterY - contentCenterY * scale,
-		scale: scale,
-	};
+    return {
+        x: viewportCenterX - contentCenterX * scale,
+        y: viewportCenterY - contentCenterY * scale,
+        scale: scale,
+    };
 }

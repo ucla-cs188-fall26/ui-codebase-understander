@@ -6,14 +6,14 @@ import { overlapsWithGap, Position, Rect } from './geometry';
 // one time a box moved its siblings by changing size: how far, and which ones. Growing pushes (a positive amount) and
 // shrinking pulls (a negative one)
 export interface Push {
-	amount: number;
-	ids: string[];
+    amount: number;
+    ids: string[];
 }
 
 // a box's pushes in each direction, oldest first, so the box changing size the other way takes back the latest exactly
 export interface Pushes {
-	right: Push[];
-	down: Push[];
+    right: Push[];
+    down: Push[];
 }
 
 /**
@@ -24,8 +24,8 @@ export interface Pushes {
  * @param dy How far down.
  */
 export function addOwed(owed: Map<string, Position>, id: string, dx: number, dy: number): void {
-	const before = owed.get(id) ?? { x: 0, y: 0 };
-	owed.set(id, { x: before.x + dx, y: before.y + dy });
+    const before = owed.get(id) ?? { x: 0, y: 0 };
+    owed.set(id, { x: before.x + dx, y: before.y + dy });
 }
 
 /**
@@ -36,24 +36,24 @@ export function addOwed(owed: Map<string, Position>, id: string, dx: number, dy:
  * @param after Where each sibling is going. Changed in place.
  */
 export function payOwed(owed: Map<string, Position>, before: Map<string, Rect>, after: Map<string, Rect>): void {
-	let paidOne = true;
-	while (paidOne) {
-		paidOne = false;
-		for (const [siblingId, rect] of after) {
-			const move = owed.get(siblingId);
-			if (move === undefined) {
-				continue;
-			}
-			const moved = { x: rect.x + move.x, y: rect.y + move.y, width: rect.width, height: rect.height };
-			const others = new Map(after);
-			others.set(siblingId, moved);
-			if (!landsOnAnother(siblingId, moved, before, others)) {
-				after.set(siblingId, moved);
-				owed.delete(siblingId);
-				paidOne = true;
-			}
-		}
-	}
+    let paidOne = true;
+    while (paidOne) {
+        paidOne = false;
+        for (const [siblingId, rect] of after) {
+            const move = owed.get(siblingId);
+            if (move === undefined) {
+                continue;
+            }
+            const moved = { x: rect.x + move.x, y: rect.y + move.y, width: rect.width, height: rect.height };
+            const others = new Map(after);
+            others.set(siblingId, moved);
+            if (!landsOnAnother(siblingId, moved, before, others)) {
+                after.set(siblingId, moved);
+                owed.delete(siblingId);
+                paidOne = true;
+            }
+        }
+    }
 }
 
 /**
@@ -66,16 +66,16 @@ export function payOwed(owed: Map<string, Position>, before: Map<string, Rect>, 
  * @param dy How far down.
  */
 export function moveInPath(before: Map<string, Rect>, after: Map<string, Rect>, beside: Set<string>, below: Set<string>, dx: number, dy: number): void {
-	for (const [siblingId, rect] of before) {
-		if (beside.has(siblingId) || below.has(siblingId)) {
-			after.set(siblingId, {
-				x: beside.has(siblingId) ? rect.x + dx : rect.x,
-				y: below.has(siblingId) ? rect.y + dy : rect.y,
-				width: rect.width,
-				height: rect.height,
-			});
-		}
-	}
+    for (const [siblingId, rect] of before) {
+        if (beside.has(siblingId) || below.has(siblingId)) {
+            after.set(siblingId, {
+                x: beside.has(siblingId) ? rect.x + dx : rect.x,
+                y: below.has(siblingId) ? rect.y + dy : rect.y,
+                width: rect.width,
+                height: rect.height,
+            });
+        }
+    }
 }
 
 /**
@@ -89,28 +89,28 @@ export function moveInPath(before: Map<string, Rect>, after: Map<string, Rect>, 
  * @param dy How far down.
  */
 export function carryAlong(before: Map<string, Rect>, after: Map<string, Rect>, beside: Set<string>, below: Set<string>, dx: number, dy: number): void {
-	let carriedOne = true;
-	while (carriedOne) {
-		carriedOne = false;
-		for (const [movedId, moved] of after) {
-			if (moved === before.get(movedId)) {
-				continue;
-			}
-			for (const [stillId, still] of after) {
-				if (still !== before.get(stillId) || !overlapsWithGap(moved, still, 0) || overlapsWithGap(before.get(movedId)!, still, 0)) {
-					continue;
-				}
-				if (beside.has(movedId)) {
-					beside.add(stillId);
-				}
-				if (below.has(movedId)) {
-					below.add(stillId);
-				}
-				moveInPath(new Map([[stillId, still]]), after, beside, below, dx, dy);
-				carriedOne = true;
-			}
-		}
-	}
+    let carriedOne = true;
+    while (carriedOne) {
+        carriedOne = false;
+        for (const [movedId, moved] of after) {
+            if (moved === before.get(movedId)) {
+                continue;
+            }
+            for (const [stillId, still] of after) {
+                if (still !== before.get(stillId) || !overlapsWithGap(moved, still, 0) || overlapsWithGap(before.get(movedId)!, still, 0)) {
+                    continue;
+                }
+                if (beside.has(movedId)) {
+                    beside.add(stillId);
+                }
+                if (below.has(movedId)) {
+                    below.add(stillId);
+                }
+                moveInPath(new Map([[stillId, still]]), after, beside, below, dx, dy);
+                carriedOne = true;
+            }
+        }
+    }
 }
 
 /**
@@ -119,13 +119,13 @@ export function carryAlong(before: Map<string, Rect>, after: Map<string, Rect>, 
  * @returns A copy, with copies of each push.
  */
 export function copyPushes(pushes: Pushes | undefined): Pushes {
-	function copyPush(push: Push): Push {
-		return { amount: push.amount, ids: [...push.ids] };
-	}
-	if (pushes === undefined) {
-		return { right: [], down: [] };
-	}
-	return { right: pushes.right.map(copyPush), down: pushes.down.map(copyPush) };
+    function copyPush(push: Push): Push {
+        return { amount: push.amount, ids: [...push.ids] };
+    }
+    if (pushes === undefined) {
+        return { right: [], down: [] };
+    }
+    return { right: pushes.right.map(copyPush), down: pushes.down.map(copyPush) };
 }
 
 /**
@@ -139,34 +139,34 @@ export function copyPushes(pushes: Pushes | undefined): Pushes {
  * @returns How much of the change was used up.
  */
 export function takeBackPushes(pushes: Push[], change: number, rects: Map<string, Rect>, direction: 'right' | 'down'): number {
-	let taken = 0;
-	while (pushes.length > 0) {
-		const latest = pushes[pushes.length - 1];
-		const left = change - taken;
-		if (left === 0 || Math.sign(latest.amount) === Math.sign(left)) {
-			break;
-		}
+    let taken = 0;
+    while (pushes.length > 0) {
+        const latest = pushes[pushes.length - 1];
+        const left = change - taken;
+        if (left === 0 || Math.sign(latest.amount) === Math.sign(left)) {
+            break;
+        }
 
-		// as much of the latest push as the change covers
-		const step = Math.sign(left) * Math.min(Math.abs(latest.amount), Math.abs(left));
-		for (const siblingId of latest.ids) {
-			const rect = rects.get(siblingId);
-			if (rect !== undefined) {
-				const x = direction === 'right' ? rect.x + step : rect.x;
-				const y = direction === 'down' ? rect.y + step : rect.y;
-				rects.set(siblingId, { x: x, y: y, width: rect.width, height: rect.height });
-			}
-		}
-		taken += step;
+        // as much of the latest push as the change covers
+        const step = Math.sign(left) * Math.min(Math.abs(latest.amount), Math.abs(left));
+        for (const siblingId of latest.ids) {
+            const rect = rects.get(siblingId);
+            if (rect !== undefined) {
+                const x = direction === 'right' ? rect.x + step : rect.x;
+                const y = direction === 'down' ? rect.y + step : rect.y;
+                rects.set(siblingId, { x: x, y: y, width: rect.width, height: rect.height });
+            }
+        }
+        taken += step;
 
-		// what's left of it, unless it's all taken back (give or take rounding)
-		const remaining = latest.amount + step;
-		pushes.pop();
-		if (Math.abs(remaining) > 0.000001) {
-			pushes.push({ amount: remaining, ids: latest.ids });
-		}
-	}
-	return taken;
+        // what's left of it, unless it's all taken back (give or take rounding)
+        const remaining = latest.amount + step;
+        pushes.pop();
+        if (Math.abs(remaining) > 0.000001) {
+            pushes.push({ amount: remaining, ids: latest.ids });
+        }
+    }
+    return taken;
 }
 
 /**
@@ -177,13 +177,13 @@ export function takeBackPushes(pushes: Push[], change: number, rects: Map<string
  * @returns Their ids.
  */
 export function movedFrom(inPath: Set<string>, before: Map<string, Rect>, after: Map<string, Rect>): string[] {
-	const moved: string[] = [];
-	for (const siblingId of inPath) {
-		if (after.get(siblingId) !== before.get(siblingId)) {
-			moved.push(siblingId);
-		}
-	}
-	return moved;
+    const moved: string[] = [];
+    for (const siblingId of inPath) {
+        if (after.get(siblingId) !== before.get(siblingId)) {
+            moved.push(siblingId);
+        }
+    }
+    return moved;
 }
 
 /**
@@ -192,12 +192,12 @@ export function movedFrom(inPath: Set<string>, before: Map<string, Rect>, after:
  * @param siblingId The sibling.
  */
 export function forgetPushed(pushes: Pushes, siblingId: string): void {
-	for (const push of pushes.right.concat(pushes.down)) {
-		const index = push.ids.indexOf(siblingId);
-		if (index !== -1) {
-			push.ids.splice(index, 1);
-		}
-	}
+    for (const push of pushes.right.concat(pushes.down)) {
+        const index = push.ids.indexOf(siblingId);
+        if (index !== -1) {
+            push.ids.splice(index, 1);
+        }
+    }
 }
 
 /**
@@ -208,18 +208,18 @@ export function forgetPushed(pushes: Pushes, siblingId: string): void {
  * @param after Where each sibling would go. Changed in place.
  */
 export function cancelPullsOntoOthers(before: Map<string, Rect>, after: Map<string, Rect>): void {
-	let cancelledOne = true;
-	while (cancelledOne) {
-		cancelledOne = false;
-		for (const [id, rect] of after) {
-			const start = before.get(id)!;
-			const moved = rect.x !== start.x || rect.y !== start.y;
-			if (moved && landsOnAnother(id, rect, before, after)) {
-				after.set(id, start);
-				cancelledOne = true;
-			}
-		}
-	}
+    let cancelledOne = true;
+    while (cancelledOne) {
+        cancelledOne = false;
+        for (const [id, rect] of after) {
+            const start = before.get(id)!;
+            const moved = rect.x !== start.x || rect.y !== start.y;
+            if (moved && landsOnAnother(id, rect, before, after)) {
+                after.set(id, start);
+                cancelledOne = true;
+            }
+        }
+    }
 }
 
 /**
@@ -231,17 +231,17 @@ export function cancelPullsOntoOthers(before: Map<string, Rect>, after: Map<stri
  * @returns True if it lands on one.
  */
 function landsOnAnother(id: string, rect: Rect, before: Map<string, Rect>, after: Map<string, Rect>): boolean {
-	for (const [otherId, other] of after) {
-		if (otherId === id) {
-			continue;
-		}
-		const overlapsNow = overlapsWithGap(rect, other, 0);
-		const overlappedBefore = overlapsWithGap(before.get(id)!, before.get(otherId)!, 0);
-		if (overlapsNow && !overlappedBefore) {
-			return true;
-		}
-	}
-	return false;
+    for (const [otherId, other] of after) {
+        if (otherId === id) {
+            continue;
+        }
+        const overlapsNow = overlapsWithGap(rect, other, 0);
+        const overlappedBefore = overlapsWithGap(before.get(id)!, before.get(otherId)!, 0);
+        if (overlapsNow && !overlappedBefore) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /**
@@ -253,28 +253,28 @@ function landsOnAnother(id: string, rect: Rect, before: Map<string, Rect>, after
  * @returns The ids of every box that has to move.
  */
 export function chainInPath(siblings: Map<string, Rect>, path: { start: number; end: number; edge: number }, direction: 'down' | 'right'): Set<string> {
-	// each box as its range across the direction, and where it starts and ends along it
-	function across(rect: Rect): { start: number; end: number } {
-		return direction === 'down' ? { start: rect.x, end: rect.x + rect.width } : { start: rect.y, end: rect.y + rect.height };
-	}
-	function along(rect: Rect): { start: number; end: number } {
-		return direction === 'down' ? { start: rect.y, end: rect.y + rect.height } : { start: rect.x, end: rect.x + rect.width };
-	}
+    // each box as its range across the direction, and where it starts and ends along it
+    function across(rect: Rect): { start: number; end: number } {
+        return direction === 'down' ? { start: rect.x, end: rect.x + rect.width } : { start: rect.y, end: rect.y + rect.height };
+    }
+    function along(rect: Rect): { start: number; end: number } {
+        return direction === 'down' ? { start: rect.y, end: rect.y + rect.height } : { start: rect.x, end: rect.x + rect.width };
+    }
 
-	const found = new Set<string>();
+    const found = new Set<string>();
 
-	// the growing box first, then each box found, each looking past its own far edge within its own range
-	const toCheck = [{ start: path.start, end: path.end, edge: path.edge }];
-	while (toCheck.length > 0) {
-		const current = toCheck.pop()!;
-		for (const [siblingId, rect] of siblings) {
-			const range = across(rect);
-			const shares = range.start < current.end && current.start < range.end;
-			if (!found.has(siblingId) && shares && along(rect).start >= current.edge) {
-				found.add(siblingId);
-				toCheck.push({ start: range.start, end: range.end, edge: along(rect).end });
-			}
-		}
-	}
-	return found;
+    // the growing box first, then each box found, each looking past its own far edge within its own range
+    const toCheck = [{ start: path.start, end: path.end, edge: path.edge }];
+    while (toCheck.length > 0) {
+        const current = toCheck.pop()!;
+        for (const [siblingId, rect] of siblings) {
+            const range = across(rect);
+            const shares = range.start < current.end && current.start < range.end;
+            if (!found.has(siblingId) && shares && along(rect).start >= current.edge) {
+                found.add(siblingId);
+                toCheck.push({ start: range.start, end: range.end, edge: along(rect).end });
+            }
+        }
+    }
+    return found;
 }

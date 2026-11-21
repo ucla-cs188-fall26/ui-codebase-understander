@@ -17,11 +17,11 @@ const MAX_SCORE = 16;
  * @returns The box width and height in pixels.
  */
 export function nodeSize(childCount: number, indegree: number): Size {
-	const score = importanceScore(childCount, indegree);
-	const scale = Math.min(score / MAX_SCORE, 1);
+    const score = importanceScore(childCount, indegree);
+    const scale = Math.min(score / MAX_SCORE, 1);
 
-	return {
-		width: MIN_WIDTH + scale * (MAX_WIDTH - MIN_WIDTH),
-		height: MIN_HEIGHT + scale * (MAX_HEIGHT - MIN_HEIGHT),
-	};
+    return {
+        width: MIN_WIDTH + scale * (MAX_WIDTH - MIN_WIDTH),
+        height: MIN_HEIGHT + scale * (MAX_HEIGHT - MIN_HEIGHT),
+    };
 }
