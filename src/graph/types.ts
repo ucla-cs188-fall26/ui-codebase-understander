@@ -1,5 +1,5 @@
 export type NodeKind = 'repo' | 'directory' | 'file'; // add class/function later
-export type EdgeKind = 'import' | 'flow'; // add call/reference later
+export type EdgeKind = 'import' | 'event' | 'message' | 'flow'; // add call/reference later
 
 export const ROOT_ID = '.';
 
@@ -23,6 +23,7 @@ export interface Edge {
     to: string;
     kind: EdgeKind;
     lines?: LineRange; // where in the importing file it's written; missing on edges made by grouping
+    name?: string; // for an event or message edge, the event's name or the message's type
 }
 
 export interface Graph {

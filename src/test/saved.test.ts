@@ -15,18 +15,19 @@ suite('saving the layout', () => {
         const camera = { x: 10, y: 20, scale: 1.5 };
 
         // through JSON text, the way a message or VS Code's storage carries it
-        const text = JSON.stringify(toSaved(state, camera, 'hidden', 3));
+        const text = JSON.stringify(toSaved(state, camera, 'hidden', 3, new Set(['event'])));
         const restored = fromSaved(JSON.parse(text), info);
 
         assert.deepStrictEqual(restored.state, state);
         assert.deepStrictEqual(restored.camera, camera);
         assert.strictEqual(restored.arrowMode, 'hidden');
         assert.strictEqual(restored.arrowDepth, 3);
+        assert.deepStrictEqual(restored.hiddenKinds, new Set(['event']));
     });
 
     test('drops anything about nodes that no longer exist', () => {
         const info = makeInfo();
-        const saved = toSaved(createLayoutState(), { x: 0, y: 0, scale: 1 }, 'default', 1);
+        const saved = toSaved(createLayoutState(), { x: 0, y: 0, scale: 1 }, 'default', 1, new Set());
         saved.expanded.push('deleted');
         saved.homes.push(['deleted/file.ts', { x: 1, y: 1 }]);
 
@@ -38,19 +39,21 @@ suite('saving the layout', () => {
 
     test('uses the default arrow settings for a layout saved before the settings existed', () => {
         const info = makeInfo();
-        const saved = toSaved(createLayoutState(), { x: 0, y: 0, scale: 1 }, 'full', 4);
+        const saved = toSaved(createLayoutState(), { x: 0, y: 0, scale: 1 }, 'full', 4, new Set());
         delete saved.arrowMode;
         delete saved.arrowDepth;
+        delete saved.hiddenKinds;
 
         const restored = fromSaved(saved, info);
 
         assert.strictEqual(restored.arrowMode, 'default');
         assert.strictEqual(restored.arrowDepth, 1);
+        assert.deepStrictEqual(restored.hiddenKinds, new Set());
     });
 
     test('uses depth 1 for a depth that isn\'t a number, like one saved when the depth was picked from a list', () => {
         const info = makeInfo();
-        const saved = JSON.parse(JSON.stringify(toSaved(createLayoutState(), { x: 0, y: 0, scale: 1 }, 'full', 4)));
+        const saved = JSON.parse(JSON.stringify(toSaved(createLayoutState(), { x: 0, y: 0, scale: 1 }, 'full', 4, new Set())));
         saved.arrowDepth = 'all';
 
         const restored = fromSaved(saved, info);

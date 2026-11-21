@@ -15,8 +15,8 @@ import { draggedId, handleClick, handlePointerDown, handlePointerMove, handlePoi
 import { makePageCounter } from './pageMenu';
 import { clearSelectionIfClosedAway, drawSidebar } from './sidebar';
 import { applyStyle } from './style';
-import { drawToolbar, makePopupHeading, showArrowDepth, showArrowMode } from './toolbar';
-import { setRedraw, view, vscode } from './view';
+import { drawToolbar, makePopupHeading, showArrowDepth, showArrowKinds, showArrowMode } from './toolbar';
+import { setRedraw, shownKinds, view, vscode } from './view';
 import { applyCamera, FIT_MARGIN, fitToView, handleWheel, scheduleSave } from './viewport';
 // margin between the panel's top-left corner and the layout
 const START_X = 40;
@@ -147,7 +147,7 @@ function drawGraph(): void {
         kept.push(view.selectedId);
     }
     // the selected arrow stays as it was clicked, without splitting out any other arrow
-    const edges = visibleEdges(view.state, view.info, rects, strips, view.arrowDepth, kept, view.selectedEdge);
+    const edges = visibleEdges(view.state, view.info, rects, strips, view.arrowDepth, kept, view.selectedEdge, shownKinds());
     view.lastEdges = edges;
     const arrows = placeArrows(edges, arrowRects);
 
@@ -567,11 +567,15 @@ function handleMessage(event: MessageEvent<ExtensionToWebview>): void {
             view.camera = restored.camera;
             view.arrowMode = restored.arrowMode;
             view.arrowDepth = restored.arrowDepth;
+            view.hiddenKinds = restored.hiddenKinds;
             showArrowMode();
         } else {
             view.state = createLayoutState();
         }
         showArrowDepth();
+
+        // kinds the repo has none of can't be switched on
+        showArrowKinds();
 
         // give homes to anything new since the save; boxes already placed keep theirs
         for (const id of view.state.expanded) {

@@ -275,7 +275,7 @@ suite('making room when a box changes size', () => {
         const before = homesIn(state, info);
         resizeTo(state, info, 'p/a', hugeSize(info));
 
-        const text = JSON.stringify(toSaved(state, { x: 0, y: 0, scale: 1 }, 'default', 1));
+        const text = JSON.stringify(toSaved(state, { x: 0, y: 0, scale: 1 }, 'default', 1, new Set()));
         const restored = fromSaved(JSON.parse(text), info).state;
         resizeTo(restored, info, 'p/a', defaultSize(info, 'p/a'));
 

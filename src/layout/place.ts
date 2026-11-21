@@ -1,4 +1,4 @@
-import { Edge, ROOT_ID } from '../graph/types';
+import { Edge, EdgeKind, ROOT_ID } from '../graph/types';
 import { getLineage } from '../analysis/lookups';
 import { isInside } from '../analysis/edges';
 import { overlapsWithGap, Position, Rect } from './geometry';
@@ -390,10 +390,11 @@ export interface VisibleEdge extends Edge {
  *   it, like the selected box; their other ends still follow the depth.
  * @param pinned The selected arrow, if any. The graph's edges it stands for keep its two ends while both are still
  *   drawn, so it doesn't vanish when what's merged changes, and selecting it doesn't split any other arrow out.
- * @returns One edge per pair of ends with an edge between them, in the order first seen, each with the graph's edges
- *   that landed on it.
+ * @param shownKinds The kinds of edges to draw, from the arrow settings; undefined for every kind.
+ * @returns One edge per pair of ends and kind with an edge between them, in the order first seen, each with the
+ *   graph's edges that landed on it. An import and an event between the same two boxes are two arrows.
  */
-export function visibleEdges(state: LayoutState, info: GraphInfo, rects: Map<string, Rect>, strips: Strip[] = [], maxDepth: number = Infinity, kept: string[] = [], pinned: VisibleEdge | undefined = undefined): VisibleEdge[] {
+export function visibleEdges(state: LayoutState, info: GraphInfo, rects: Map<string, Rect>, strips: Strip[] = [], maxDepth: number = Infinity, kept: string[] = [], pinned: VisibleEdge | undefined = undefined, shownKinds: Set<EdgeKind> | undefined = undefined): VisibleEdge[] {
     // one per pair of ends, in the order first seen, counting the edges that land on it
     const byEnds = new Map<string, VisibleEdge>();
     const arrowEnds = makeArrowEndFinder(state, info, rects, strips, kept);
@@ -414,6 +415,11 @@ export function visibleEdges(state: LayoutState, info: GraphInfo, rects: Map<str
     }
 
     for (const edge of info.edges) {
+        // a kind the arrow settings have turned off
+        if (shownKinds !== undefined && !shownKinds.has(edge.kind)) {
+            continue;
+        }
+
         let ends = arrowEnds(edge, maxDepth);
         if (pinnedEdges.has(edge)) {
             ends = { from: pinned!.from, to: pinned!.to };
@@ -429,9 +435,9 @@ export function visibleEdges(state: LayoutState, info: GraphInfo, rects: Map<str
             continue;
         }
 
-        // many edges can land on the same two visible boxes. A strip's id has a newline in it, so the two ends are
-        // joined with a character ids never have
-        const key = from + '\u0000' + to;
+        // many edges of a kind can land on the same two visible boxes. A strip's id has a newline in it, so the two
+        // ends and the kind are joined with a character ids never have
+        const key = from + '\u0000' + to + '\u0000' + edge.kind;
         const known = byEnds.get(key);
         if (known !== undefined) {
             known.count++;

@@ -1,4 +1,4 @@
-import { Edge } from '../graph/types';
+import { Edge, EdgeKind } from '../graph/types';
 import { Arrow, arrowBounds, arrowHead, arrowPath, arrowWidth } from '../layout/arrows';
 import { Rect } from '../layout/geometry';
 import { VisibleEdge } from '../layout/place';
@@ -13,7 +13,64 @@ import { redraw, view } from './view';
  * @returns True if it's the selected arrow's edge.
  */
 export function isSelectedEdge(edge: Edge): boolean {
-    return view.selectedEdge !== undefined && view.selectedEdge.from === edge.from && view.selectedEdge.to === edge.to;
+    const selected = view.selectedEdge;
+    return selected !== undefined && selected.from === edge.from && selected.to === edge.to && selected.kind === edge.kind;
+}
+
+// how each kind of arrow is counted in words: "1 import", "3 events"; and as a heading, like "Imports"
+export interface KindWords {
+    one: string;
+    many: string;
+    heading: string;
+}
+const KIND_WORDS: Record<EdgeKind, KindWords> = {
+    import: { one: 'import', many: 'imports', heading: 'Imports' },
+    event: { one: 'event', many: 'events', heading: 'Events' },
+    message: { one: 'message', many: 'messages', heading: 'Messages' },
+    flow: { one: 'step', many: 'steps', heading: 'Steps' },
+};
+
+// kinds of links that only happen when the code runs, like an event firing, rather than being part of its structure,
+// like an import. They draw dashed, so they stand out from the structure; a new kind joins one family or the other
+const RUNTIME_KINDS: EdgeKind[] = ['event', 'message'];
+
+/**
+ * Checks whether a kind of arrow is a link that only happens at runtime.
+ * @param kind The kind.
+ * @returns True for events and messages; false for imports.
+ */
+export function isRuntimeKind(kind: EdgeKind): boolean {
+    return RUNTIME_KINDS.includes(kind);
+}
+
+/**
+ * Finds the words for a kind of arrow.
+ * @param kind The kind.
+ * @returns How one and many are said, and its heading.
+ */
+export function kindWords(kind: EdgeKind): KindWords {
+    return KIND_WORDS[kind];
+}
+
+/**
+ * Says what an arrow stands for, on hover: how many of its kind, and for events and messages, their names, since the
+ * name is what links the two ends.
+ * @param edge The arrow's edge.
+ * @returns Like "2 imports", or "2 events: saved, cleared".
+ */
+function arrowTitle(edge: VisibleEdge): string {
+    const words = kindWords(edge.kind);
+    let title = edge.count + ' ' + (edge.count === 1 ? words.one : words.many);
+    const names: string[] = [];
+    for (const graphEdge of edge.edges) {
+        if (graphEdge.name !== undefined && !names.includes(graphEdge.name)) {
+            names.push(graphEdge.name);
+        }
+    }
+    if (names.length > 0) {
+        title += ': ' + names.join(', ');
+    }
+    return title;
 }
 
 /**
@@ -31,7 +88,13 @@ export function makeArrow(arrow: Arrow, edge: VisibleEdge, zIndex: number, under
     const svg = document.createElementNS(SVG_NS, 'svg');
     svg.classList.add('arrow');
 
-    // thicker the more imports it stands for; the page's styles read this. Its head grows with it
+    // its kind, and whether it's a runtime link, which draws dashed; the page's styles read these
+    svg.classList.add('arrow-' + edge.kind);
+    if (isRuntimeKind(edge.kind)) {
+        svg.classList.add('arrow-runtime');
+    }
+
+    // thicker the more links it stands for; the page's styles read this. Its head grows with it
     const lineWidth = arrowWidth(edge.count);
     const head = arrowHead(arrow, lineWidth);
     svg.style.setProperty('--arrow-width', lineWidth + 'px');
@@ -120,9 +183,9 @@ export function makeArrow(arrow: Arrow, edge: VisibleEdge, zIndex: number, under
     }
     hit.addEventListener('click', select);
 
-    // how many imports it stands for, on hover
+    // what it stands for, on hover
     const title = document.createElementNS(SVG_NS, 'title');
-    title.textContent = edge.count === 1 ? '1 import' : edge.count + ' imports';
+    title.textContent = arrowTitle(edge);
     hit.appendChild(title);
     group.appendChild(hit);
 

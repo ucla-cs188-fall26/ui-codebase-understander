@@ -23,7 +23,7 @@ export async function resetLayout(): Promise<void> {
     }
 
     const answer = await vscode.window.showWarningMessage(
-        'Reset the whole layout? Every node closes and goes back to where it started.',
+        'Reset the whole layout? Every box closes and goes back to where it started.',
         { modal: true },
         'Reset',
     );

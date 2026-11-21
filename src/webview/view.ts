@@ -1,7 +1,8 @@
 import { Camera } from '../layout/camera';
 import { Rect } from '../layout/geometry';
 import { VisibleEdge } from '../layout/place';
-import { ArrowMode } from '../layout/saved';
+import { EdgeKind } from '../graph/types';
+import { ArrowMode, ARROW_KINDS } from '../layout/saved';
 import { createLayoutState, GraphInfo, LayoutState } from '../layout/state';
 import { FlowGraphMessage, WebviewToExtension } from '../messages';
 
@@ -31,6 +32,8 @@ interface View {
     arrowMode: ArrowMode;
     // how many levels below the folder an arrow lives in its ends may go, from the arrow settings; saved with the layout
     arrowDepth: number;
+    // the kinds of arrows the user turned off in the arrow settings; saved with the layout
+    hiddenKinds: Set<EdgeKind>;
 
     // how the world is shown; kept between redraws so new data doesn't reset the view
     camera: Camera;
@@ -46,6 +49,7 @@ export const view: View = {
     lastEdges: [],
     arrowMode: 'default',
     arrowDepth: 1,
+    hiddenKinds: new Set(),
     camera: { x: 0, y: 0, scale: 1 },
 };
 
@@ -66,4 +70,28 @@ export function setRedraw(draw: () => void): void {
  */
 export function redraw(): void {
     drawGraphFunction();
+}
+
+/**
+ * Checks whether the graph has any links of a kind. Before a graph arrives, every kind counts.
+ * @param kind The kind.
+ * @returns True if some edge in the graph is of that kind.
+ */
+export function hasKind(kind: EdgeKind): boolean {
+    return view.info === undefined || view.info.kindsPresent.has(kind);
+}
+
+/**
+ * Finds which kinds of links show, as arrows and in the sidebar: the ones the graph has that the user hasn't turned
+ * off.
+ * @returns Those kinds, in the arrow settings' order.
+ */
+export function shownKinds(): Set<EdgeKind> {
+    const shown = new Set<EdgeKind>();
+    for (const kind of ARROW_KINDS) {
+        if (hasKind(kind) && !view.hiddenKinds.has(kind)) {
+            shown.add(kind);
+        }
+    }
+    return shown;
 }

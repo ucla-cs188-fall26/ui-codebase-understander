@@ -120,7 +120,7 @@ function saveLayout(): void {
     if (view.info === undefined) {
         return;
     }
-    vscode.postMessage({ type: 'saveLayout', layout: toSaved(view.state, view.camera, view.arrowMode, view.arrowDepth) });
+    vscode.postMessage({ type: 'saveLayout', layout: toSaved(view.state, view.camera, view.arrowMode, view.arrowDepth, view.hiddenKinds) });
 }
 
 /**

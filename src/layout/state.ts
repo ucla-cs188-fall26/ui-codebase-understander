@@ -1,4 +1,4 @@
-import { Edge, Graph, Node, ROOT_ID } from '../graph/types';
+import { Edge, EdgeKind, Graph, Node, ROOT_ID } from '../graph/types';
 import { isInside, liftEdges } from '../analysis/edges';
 import { getLineage, indexChildren, indexNodes } from '../analysis/lookups';
 import { computeIndegrees, sortAllChildren } from '../analysis/metrics';
@@ -17,7 +17,9 @@ export interface GraphInfo {
     nodesById: Map<string, Node>;
     childrenById: Map<string, string[]>; // most important first
     indegrees: Map<string, number>;
-    edges: Edge[];
+    edges: Edge[]; // every kind
+    importEdges: Edge[]; // only the imports, which decide how important a box is and where it's laid out
+    kindsPresent: Set<EdgeKind>; // the kinds of edges the graph has any of
     topLevelShown: string[]; // the top-level nodes that get a box, most important first
 }
 
@@ -88,16 +90,35 @@ export interface LayoutState {
  */
 export function buildGraphInfo(graph: Graph): GraphInfo {
     const nodesById = indexNodes(graph.nodes);
-    const indegrees = computeIndegrees(nodesById, graph.edges);
+
+    // events and messages don't change box sizes, order or the default layout, for now, so a layout arranged before
+    // they were found stays as it was
+    const importEdges = graph.edges.filter(isImport);
+    const indegrees = computeIndegrees(nodesById, importEdges);
     const childrenById = sortAllChildren(indexChildren(graph.nodes), nodesById, indegrees);
-    const topLevelShown = chooseTopLevel(childrenById.get(ROOT_ID) ?? [], graph.edges, nodesById);
+    const topLevelShown = chooseTopLevel(childrenById.get(ROOT_ID) ?? [], importEdges, nodesById);
+    const kindsPresent = new Set<EdgeKind>();
+    for (const edge of graph.edges) {
+        kindsPresent.add(edge.kind);
+    }
     return {
         nodesById: nodesById,
         childrenById: childrenById,
         indegrees: indegrees,
         edges: graph.edges,
+        importEdges: importEdges,
+        kindsPresent: kindsPresent,
         topLevelShown: topLevelShown,
     };
+}
+
+/**
+ * Checks whether an edge is an import.
+ * @param edge The edge.
+ * @returns True for an import; false for an event, message or anything else.
+ */
+function isImport(edge: Edge): boolean {
+    return edge.kind === 'import';
 }
 
 /**
@@ -837,7 +858,7 @@ export function layOutChildren(state: LayoutState, info: GraphInfo, parentId: st
     let firstBatch = unplaced;
     let secondBatch: string[] = [];
     if (parentId === ROOT_ID) {
-        const inFlow = topLevelInFlow(info.edges, info.nodesById);
+        const inFlow = topLevelInFlow(info.importEdges, info.nodesById);
         firstBatch = [];
         for (const id of unplaced) {
             if (inFlow.has(id)) {
@@ -870,7 +891,7 @@ function placeUnplaced(state: LayoutState, info: GraphInfo, parentId: string, pl
     // only edges between the children being laid out, so nothing else can push them rightward
     const laidOut = new Set(unplaced);
     const edges: Edge[] = [];
-    for (const edge of liftEdges(parentId, info.edges, info.nodesById)) {
+    for (const edge of liftEdges(parentId, info.importEdges, info.nodesById)) {
         if (laidOut.has(edge.from) && laidOut.has(edge.to)) {
             edges.push(edge);
         }

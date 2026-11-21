@@ -16,6 +16,21 @@
                 "${workspaceFolder}/dist/**/*.js"
             ],
             "preLaunchTask": "${defaultBuildTask}"
+        },
+        {
+            // the same, but the new window opens this repo itself, through a workspace file next to it; VS Code won't
+            // open the folder directly while this window has it open
+            "name": "Run Extension on this repo",
+            "type": "extensionHost",
+            "request": "launch",
+            "args": [
+                "--extensionDevelopmentPath=${workspaceFolder}",
+                "${workspaceFolder}/../codeflow-self.code-workspace"
+            ],
+            "outFiles": [
+                "${workspaceFolder}/dist/**/*.js"
+            ],
+            "preLaunchTask": "${defaultBuildTask}"
         }
     ]
 }

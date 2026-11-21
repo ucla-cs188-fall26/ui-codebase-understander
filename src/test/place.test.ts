@@ -392,3 +392,57 @@ suite('arrow depth', () => {
         assert.deepStrictEqual(lit, ['app/api > app/db', 'app/api/login.ts > app/api/session.ts', 'app > scripts']);
     });
 });
+
+suite('kinds of arrows', () => {
+    // a.ts imports b.ts, and also sends c.ts an event and b.ts a message; everything is at the top level
+    function makeKinds() {
+        const nodes = buildTree('repo', ['a.ts', 'b.ts', 'c.ts']);
+        const edges: Edge[] = [
+            edge('a.ts', 'b.ts'),
+            { from: 'a.ts', to: 'c.ts', kind: 'event', lines: { start: 2, end: 2 }, name: 'saved' },
+            { from: 'a.ts', to: 'b.ts', kind: 'message', lines: { start: 3, end: 3 }, name: 'open' },
+        ];
+        const info = buildGraphInfo({ nodes: nodes, edges: edges });
+        const state = createLayoutState();
+        openNode(state, info, ROOT_ID);
+        const rects = placeBoxes(state, info, { x: 0, y: 0 });
+        return { info: info, state: state, rects: rects };
+    }
+
+    // each arrow as "from > to kind", easy to read in a failure
+    function describe(edges: { from: string; to: string; kind: string }[]): string[] {
+        return edges.map((visible) => visible.from + ' > ' + visible.to + ' ' + visible.kind);
+    }
+
+    test('an import and a message between the same two boxes are two arrows', () => {
+        const { info, state, rects } = makeKinds();
+
+        const edges = visibleEdges(state, info, rects);
+
+        assert.deepStrictEqual(describe(edges), ['a.ts > b.ts import', 'a.ts > c.ts event', 'a.ts > b.ts message']);
+    });
+
+    test('draws only the kinds the arrow settings show', () => {
+        const { info, state, rects } = makeKinds();
+
+        const edges = visibleEdges(state, info, rects, [], Infinity, [], undefined, new Set(['event', 'message']));
+
+        assert.deepStrictEqual(describe(edges), ['a.ts > c.ts event', 'a.ts > b.ts message']);
+    });
+
+    test('events and messages don\'t count toward how important a box is', () => {
+        const { info } = makeKinds();
+
+        assert.strictEqual(info.indegrees.get('b.ts'), 1);
+        assert.strictEqual(info.indegrees.get('c.ts'), 0);
+        assert.deepStrictEqual(info.importEdges, [edge('a.ts', 'b.ts')]);
+    });
+
+    test('knows which kinds the graph has', () => {
+        const withAll = makeKinds().info;
+        const importsOnly = buildGraphInfo({ nodes: buildTree('repo', ['a.ts', 'b.ts']), edges: [edge('a.ts', 'b.ts')] });
+
+        assert.deepStrictEqual(withAll.kindsPresent, new Set(['import', 'event', 'message']));
+        assert.deepStrictEqual(importsOnly.kindsPresent, new Set(['import']));
+    });
+});

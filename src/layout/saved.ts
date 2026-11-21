@@ -1,3 +1,4 @@
+import { EdgeKind } from '../graph/types';
 import { Camera } from './camera';
 import { Position, Size } from './geometry';
 import { createLayoutState, GraphInfo, LayoutState, Page, PageCell } from './state';
@@ -5,6 +6,10 @@ import { Pushes } from './push';
 
 // how strongly arrows draw, from the toolbar: only the selected box's, the rest faint, or everything in full
 export type ArrowMode = 'hidden' | 'default' | 'full';
+
+// the kinds of arrows the arrow settings can switch on and off, in order. A kind shows when the repo has some and the
+// user hasn't turned it off, so a kind the repo starts having later shows up on its own
+export const ARROW_KINDS: EdgeKind[] = ['import', 'event', 'message'];
 
 // the layout state and camera in plain arrays, since messages and VS Code's storage only carry JSON-like data
 export interface SavedLayout {
@@ -20,6 +25,7 @@ export interface SavedLayout {
     camera: Camera;
     arrowMode?: ArrowMode; // missing from layouts saved before the setting existed
     arrowDepth?: number; // the same; how many levels below the folder an arrow lives in its ends may go
+    hiddenKinds?: EdgeKind[]; // the kinds of arrows the user turned off; missing means none
 }
 
 /**
@@ -28,9 +34,10 @@ export interface SavedLayout {
  * @param camera The camera.
  * @param arrowMode The toolbar's arrow setting.
  * @param arrowDepth The toolbar's depth setting.
+ * @param hiddenKinds The kinds of arrows the user turned off in the toolbar.
  * @returns The same information, with sets and maps turned into arrays.
  */
-export function toSaved(state: LayoutState, camera: Camera, arrowMode: ArrowMode, arrowDepth: number): SavedLayout {
+export function toSaved(state: LayoutState, camera: Camera, arrowMode: ArrowMode, arrowDepth: number, hiddenKinds: Set<EdgeKind>): SavedLayout {
     return {
         expanded: Array.from(state.expanded),
         homes: Array.from(state.homes.entries()),
@@ -44,6 +51,7 @@ export function toSaved(state: LayoutState, camera: Camera, arrowMode: ArrowMode
         camera: camera,
         arrowMode: arrowMode,
         arrowDepth: arrowDepth,
+        hiddenKinds: Array.from(hiddenKinds),
     };
 }
 
@@ -51,10 +59,10 @@ export function toSaved(state: LayoutState, camera: Camera, arrowMode: ArrowMode
  * Turns saved data back into a view, skipping anything about nodes that no longer exist.
  * @param saved The saved layout.
  * @param info The current graph's lookups.
- * @returns The layout state, camera, arrow setting ('default' if it wasn't saved), and depth setting (1 if it wasn't,
- *   or wasn't a number).
+ * @returns The layout state, camera, arrow setting ('default' if it wasn't saved), depth setting (1 if it wasn't, or
+ *   wasn't a number), and the kinds of arrows the user turned off (none if it wasn't saved).
  */
-export function fromSaved(saved: SavedLayout, info: GraphInfo): { state: LayoutState; camera: Camera; arrowMode: ArrowMode; arrowDepth: number } {
+export function fromSaved(saved: SavedLayout, info: GraphInfo): { state: LayoutState; camera: Camera; arrowMode: ArrowMode; arrowDepth: number; hiddenKinds: Set<EdgeKind> } {
     // starts with the root open
     const state = createLayoutState();
 
@@ -109,5 +117,11 @@ export function fromSaved(saved: SavedLayout, info: GraphInfo): { state: LayoutS
         arrowDepth = saved.arrowDepth;
     }
 
-    return { state: state, camera: saved.camera, arrowMode: saved.arrowMode ?? 'default', arrowDepth: arrowDepth };
+    return {
+        state: state,
+        camera: saved.camera,
+        arrowMode: saved.arrowMode ?? 'default',
+        arrowDepth: arrowDepth,
+        hiddenKinds: new Set(saved.hiddenKinds ?? []),
+    };
 }

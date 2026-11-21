@@ -1,14 +1,70 @@
 import { connections, isInside } from '../analysis/edges';
 import { getLineage } from '../analysis/lookups';
-import { Edge, LineRange, NodeKind } from '../graph/types';
+import { Edge, EdgeKind, LineRange, NodeKind } from '../graph/types';
 import { groupInside, groupLinks, LinkGroup, nodeOfEnd } from '../layout/place';
 import { resetNode, showNode } from '../layout/state';
+import { kindWords } from './arrowElements';
 import { makeElement, makeTextButton } from './dom';
 import { makeCloseIcon, makeOpenIcon, makeResetIcon } from './icons';
-import { redraw, view, vscode } from './view';
+import { redraw, shownKinds, view, vscode } from './view';
 import { centerOn } from './viewport';
 
 // the sidebar: the selected box's or arrow's details, and the lists of what it connects to
+
+// how the sidebar talks about each kind of link: a box's two lists of what it links to, what each list means, what a
+// file row's toggle opens to, and what the files at an arrow's two ends are doing
+interface KindSidebar {
+    outgoing: string;
+    outgoingHint: string;
+    incoming: string;
+    incomingHint: string;
+    linesHint: string;
+    fromHint: string;
+    toHint: string;
+    names: string; // what the names an arrow carries are called
+}
+const KIND_SIDEBAR: Record<EdgeKind, KindSidebar> = {
+    import: {
+        outgoing: 'Imports',
+        outgoingHint: 'What this depends on, by importing it',
+        incoming: 'Imported by',
+        incomingHint: 'What depends on this, by importing it',
+        linesHint: 'See lines imported',
+        fromHint: 'Where the arrow starts: what does the importing',
+        toHint: 'What the arrow points at: what gets imported',
+        names: 'Names',
+    },
+    event: {
+        outgoing: 'Sends events to',
+        outgoingHint: 'What listens for the events this emits',
+        incoming: 'Gets events from',
+        incomingHint: 'What emits the events this listens for',
+        linesHint: 'See lines emitting',
+        fromHint: 'Where the arrow starts: what emits',
+        toHint: 'What the arrow points at: what listens',
+        names: 'Event names',
+    },
+    message: {
+        outgoing: 'Sends messages to',
+        outgoingHint: 'What handles the messages this posts',
+        incoming: 'Gets messages from',
+        incomingHint: 'What posts the messages this handles',
+        linesHint: 'See lines posting',
+        fromHint: 'Where the arrow starts: what posts',
+        toHint: 'What the arrow points at: what handles it',
+        names: 'Message types',
+    },
+    flow: {
+        outgoing: 'Leads to',
+        outgoingHint: 'The steps after this one',
+        incoming: 'Comes from',
+        incomingHint: 'The steps before this one',
+        linesHint: 'See lines',
+        fromHint: 'Where the arrow starts',
+        toHint: 'What the arrow points at',
+        names: 'Names',
+    },
+};
 
 /**
  * Shows the selected node's details in the sidebar, or hides the sidebar when nothing is selected.
@@ -44,7 +100,7 @@ export function drawSidebar(): void {
 
     // a directory resets everything inside it; a file only has its size to reset
     const reset = makeTextButton(makeResetIcon(), node.kind === 'file' ? 'Reset size' : 'Reset layout');
-    reset.title = node.kind === 'file' ? 'Put this box back to its default size' : 'Reset everything inside this node';
+    reset.title = node.kind === 'file' ? 'Put this box back to its default size' : 'Reset everything inside this box';
     reset.addEventListener('click', handleResetClick);
     actions.appendChild(reset);
 
@@ -61,43 +117,86 @@ export function drawSidebar(): void {
     }
     addDetail(sidebar, 'Times imported', String(view.info.indegrees.get(view.selectedId!)));
 
-    // every place each file row's import is written, in the order they're written, listed under the row when it's
-    // opened. Under "Imports", the places inside this box that import the row's file; under "Imported by", the lines
-    // in the row's file that import something in this box
-    const importsAt = new Map<string, ImportLine[]>();
-    const importedByAt = new Map<string, ImportLine[]>();
-    for (const edge of view.info.edges) {
-        if (edge.lines === undefined) {
-            continue;
-        }
-        const fromInside = isInside(edge.from, view.selectedId!, view.info.nodesById);
-        const toInside = isInside(edge.to, view.selectedId!, view.info.nodesById);
-        if (toInside && !fromInside) {
-            // the file in this box it imports
-            addImportLine(importedByAt, edge.from, { path: edge.from, lines: edge.lines, label: pathFrom(view.selectedId!, edge.to) });
-        }
-        if (fromInside && !toInside) {
-            // the file in this box that imports it
-            addImportLine(importsAt, edge.to, { path: edge.from, lines: edge.lines, label: pathFrom(view.selectedId!, edge.from) });
-        }
+    // a pair of lists for each kind that shows as arrows, for every box, with "None" where a box has none, so the lists
+    // stay in the same places from box to box. Kinds the repo lacks, or the user turned off, aren't listed
+    for (const kind of shownKinds()) {
+        addKindLists(sidebar, view.selectedId!, kind);
     }
-
-    const linked = connections(view.selectedId!, view.info.edges, view.info.nodesById);
-    addConnectionList(sidebar, 'Imports', groupLinks(view.selectedId!, linked.outgoing, view.info, view.arrowDepth), {
-        hint: 'What this depends on, by importing it',
-        lines: importsAt,
-    });
-    addConnectionList(sidebar, 'Imported by', groupLinks(view.selectedId!, linked.incoming, view.info, view.arrowDepth), {
-        hint: 'What depends on this, by importing it',
-        lines: importedByAt,
-    });
 
     sidebar.classList.add('visible');
 }
 
 /**
- * Shows the selected arrow in the sidebar: its two ends and how many imports it stands for, then the files at each
- * end, grouped by the folders inside each end's box and opening like the box sidebar's lists.
+ * Adds a box's two lists for one kind of link: what it links to, and what links to it, like "Imports" and "Imported
+ * by".
+ * @param sidebar The sidebar element.
+ * @param boxId The selected box.
+ * @param kind The kind of link.
+ */
+function addKindLists(sidebar: HTMLElement, boxId: string, kind: EdgeKind): void {
+    const info = view.info!;
+    const edges: Edge[] = [];
+    for (const edge of info.edges) {
+        if (edge.kind === kind) {
+            edges.push(edge);
+        }
+    }
+
+    const linked = connections(boxId, edges, info.nodesById);
+
+    // every place each file row's link is written, in the order they're written, listed under the row when it's
+    // opened. Under the first list, like "Imports", the places inside this box that link to the row's file; under the
+    // second, like "Imported by", the lines in the row's file that link to something in this box
+    const outgoingAt = new Map<string, ImportLine[]>();
+    const incomingAt = new Map<string, ImportLine[]>();
+    for (const edge of edges) {
+        if (edge.lines === undefined) {
+            continue;
+        }
+        const fromInside = isInside(edge.from, boxId, info.nodesById);
+        const toInside = isInside(edge.to, boxId, info.nodesById);
+        if (toInside && !fromInside) {
+            // the file in this box it links to
+            addImportLine(incomingAt, edge.from, { path: edge.from, lines: edge.lines, label: lineLabel(boxId, edge.to, edge) });
+        }
+        if (fromInside && !toInside) {
+            // the file in this box that links to it
+            addImportLine(outgoingAt, edge.to, { path: edge.from, lines: edge.lines, label: lineLabel(boxId, edge.from, edge) });
+        }
+    }
+
+    const words = KIND_SIDEBAR[kind];
+    addConnectionList(sidebar, words.outgoing, groupLinks(boxId, linked.outgoing, info, view.arrowDepth), {
+        hint: words.outgoingHint,
+        lines: outgoingAt,
+        kind: kind,
+    });
+    addConnectionList(sidebar, words.incoming, groupLinks(boxId, linked.incoming, info, view.arrowDepth), {
+        hint: words.incomingHint,
+        lines: incomingAt,
+        kind: kind,
+    });
+}
+
+/**
+ * Writes how a place a link is written reads in a list: the file's path from a box, and for an event or message, its
+ * name, since that's what links the two files.
+ * @param boxId The box the path is from.
+ * @param id The file the row names.
+ * @param edge The link.
+ * @returns Like "v1/events.js", or "store.ts: saved".
+ */
+function lineLabel(boxId: string, id: string, edge: Edge): string {
+    const path = pathFrom(boxId, id);
+    if (edge.name === undefined) {
+        return path;
+    }
+    return path + ': ' + edge.name;
+}
+
+/**
+ * Shows the selected arrow in the sidebar: its two ends, its kind and how many links it stands for, then the files at
+ * each end, grouped by the folders inside each end's box and opening like the box sidebar's lists.
  * @param sidebar The sidebar element.
  * @param selected The arrow's edge.
  */
@@ -105,21 +204,21 @@ function drawEdgeSidebar(sidebar: HTMLElement, selected: Edge): void {
     sidebar.replaceChildren();
 
     // rows opened in the lists stay open while this arrow is selected
-    const arrowKey = selected.from + '\n\n' + selected.to;
+    const arrowKey = selected.from + '\n\n' + selected.to + '\n\n' + selected.kind;
     if (openLinkRowsFor !== arrowKey) {
         openLinkRows.clear();
         openLinkRowsFor = arrowKey;
     }
 
-    // the arrow as last drawn carries every import it stands for, grouped the same way
+    // the arrow as last drawn carries every link it stands for, grouped the same way
     let represented: Edge[] = [];
     for (const arrow of view.lastEdges) {
-        if (arrow.from === selected.from && arrow.to === selected.to) {
+        if (arrow.from === selected.from && arrow.to === selected.to && arrow.kind === selected.kind) {
             represented = arrow.edges;
         }
     }
 
-    // how many imports come from each file on one end, and go to each file on the other
+    // how many links come from each file on one end, and go to each file on the other
     const fromCounts = new Map<string, number>();
     const toCounts = new Map<string, number>();
     for (const edge of represented) {
@@ -127,12 +226,17 @@ function drawEdgeSidebar(sidebar: HTMLElement, selected: Edge): void {
         toCounts.set(edge.to, (toCounts.get(edge.to) ?? 0) + 1);
     }
 
-    // every line where each importing file imports something at the other end, listed under its row when it's opened
+    // every line where each file at the start links to something at the other end, listed under its row when it's
+    // opened; and the names of the events or messages, in the order first seen
     const fromLines = new Map<string, ImportLine[]>();
+    const names: string[] = [];
     for (const edge of represented) {
         if (edge.lines !== undefined) {
-            // the file at the other end it imports
-            addImportLine(fromLines, edge.from, { path: edge.from, lines: edge.lines, label: pathFrom(nodeOfEnd(selected.to), edge.to) });
+            // the file at the other end it links to
+            addImportLine(fromLines, edge.from, { path: edge.from, lines: edge.lines, label: lineLabel(nodeOfEnd(selected.to), edge.to, edge) });
+        }
+        if (edge.name !== undefined && !names.includes(edge.name)) {
+            names.push(edge.name);
         }
     }
 
@@ -147,22 +251,27 @@ function drawEdgeSidebar(sidebar: HTMLElement, selected: Edge): void {
     // styled
     addDetail(sidebar, 'From', '').querySelector('.sidebar-value')!.appendChild(makeEndLabel(selected.from, endPath(selected.from)));
     addDetail(sidebar, 'To', '').querySelector('.sidebar-value')!.appendChild(makeEndLabel(selected.to, endPath(selected.to)));
-    addDetail(sidebar, 'Kind', 'import');
-    addDetail(sidebar, 'Imports', String(represented.length));
+    addDetail(sidebar, 'Kind', selected.kind);
+    addDetail(sidebar, kindWords(selected.kind).heading, String(represented.length));
+    if (names.length > 0) {
+        addDetail(sidebar, KIND_SIDEBAR[selected.kind].names, names.join(', '));
+    }
 
     // section headings are plain, so a hidden end just says so in words
     const fromBox = nodeOfEnd(selected.from);
     const toBox = nodeOfEnd(selected.to);
     addConnectionList(sidebar, 'From', groupInside(fromBox, fromCounts, view.info!), {
         name: hiddenPrefix(selected.from) + endName(selected.from),
-        hint: 'Where the arrow starts: the files doing the importing',
+        hint: KIND_SIDEBAR[selected.kind].fromHint,
         relativeTo: fromBox,
         lines: fromLines,
+        kind: selected.kind,
     });
     addConnectionList(sidebar, 'To', groupInside(toBox, toCounts, view.info!), {
         name: hiddenPrefix(selected.to) + endName(selected.to),
-        hint: 'What the arrow points at: the files being imported',
+        hint: KIND_SIDEBAR[selected.kind].toHint,
         relativeTo: toBox,
+        kind: selected.kind,
     });
     sidebar.classList.add('visible');
 }
@@ -335,7 +444,8 @@ interface ListOptions {
     name?: string; // a box's name after the title, kept in its own case
     hint?: string; // what the list means, shown on hovering its title
     relativeTo?: string; // a box whose rows these are inside, so top rows show their path from it
-    lines?: Map<string, ImportLine[]>; // the places each file row's import is written, listed under it when opened
+    lines?: Map<string, ImportLine[]>; // the places each file row's link is written, listed under it when opened
+    kind?: EdgeKind; // the kind of link the rows count; imports if left out
 }
 
 /**
@@ -394,7 +504,7 @@ const openLinkRows = new Set<string>();
 let openLinkRowsFor: string | undefined = undefined;
 
 /**
- * Adds a titled list of what the selected box connects to, grouped the way its arrows are, most imports first; a
+ * Adds a titled list of what the selected box connects to, grouped the way its arrows are, most links first; a
  * folder row opens to what's inside it, and clicking a row jumps to it.
  * @param sidebar The sidebar element.
  * @param title The section title.
@@ -435,7 +545,7 @@ function addConnectionList(sidebar: HTMLElement, title: string, groups: LinkGrou
             const text = level === 0 ? topRowText(row.id) : view.info!.nodesById.get(row.id)!.name;
             const rowLines = lines?.get(row.id) ?? [];
             const canOpen = row.children.length > 0 || rowLines.length > 0;
-            sidebar.appendChild(makeLinkRow(row, text, level, key, canOpen));
+            sidebar.appendChild(makeLinkRow(row, text, level, key, canOpen, options.kind ?? 'import'));
             if (openLinkRows.has(key)) {
                 addRows(row.children, level + 1);
                 for (const line of rowLines) {
@@ -448,16 +558,17 @@ function addConnectionList(sidebar: HTMLElement, title: string, groups: LinkGrou
 }
 
 /**
- * Makes one sidebar row: a toggle if it has rows inside it, its name, how many imports go through it, and a button to
+ * Makes one sidebar row: a toggle if it has rows inside it, its name, how many links go through it, and a button to
  * open it. Clicking the row jumps to it; clicking the toggle opens or closes it without jumping.
  * @param row The row, from groupLinks.
  * @param text What the row says.
  * @param level How deep it sits in the list, for its indent.
  * @param key Which row it is, for remembering whether it's open.
- * @param canOpen Whether it has anything under it to open: rows inside it, or places its import is written.
+ * @param canOpen Whether it has anything under it to open: rows inside it, or places its link is written.
+ * @param kind The kind of link it counts.
  * @returns The row.
  */
-function makeLinkRow(row: LinkGroup, text: string, level: number, key: string, canOpen: boolean): HTMLElement {
+function makeLinkRow(row: LinkGroup, text: string, level: number, key: string, canOpen: boolean, kind: EdgeKind): HTMLElement {
     const link = makeElement('div', 'sidebar-link');
     link.title = row.id; // the full path on hover
     link.dataset.id = row.id;
@@ -467,9 +578,9 @@ function makeLinkRow(row: LinkGroup, text: string, level: number, key: string, c
     const toggle = makeRowToggle(level);
     if (canOpen) {
         toggle.textContent = openLinkRows.has(key) ? '▾' : '▸';
-        // a file row opens to its import lines; a folder row to what's inside it
+        // a file row opens to the lines its link is written on; a folder row to what's inside it
         if (row.children.length === 0) {
-            toggle.title = 'See lines imported';
+            toggle.title = KIND_SIDEBAR[kind].linesHint;
         }
         function flip(event: MouseEvent): void {
             event.stopPropagation();
@@ -488,7 +599,8 @@ function makeLinkRow(row: LinkGroup, text: string, level: number, key: string, c
     link.appendChild(textElement);
 
     const count = makeElement('span', 'sidebar-count', String(row.count));
-    count.title = row.count === 1 ? '1 import' : row.count + ' imports';
+    const words = kindWords(kind);
+    count.title = row.count + ' ' + (row.count === 1 ? words.one : words.many);
     link.appendChild(count);
 
     const node = view.info!.nodesById.get(row.id)!;

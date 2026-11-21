@@ -1,9 +1,11 @@
 import { getLineage } from '../analysis/lookups';
+import { EdgeKind } from '../graph/types';
 import { ArrowMode } from '../layout/saved';
+import { isRuntimeKind, kindWords } from './arrowElements';
 import { makeElement, makeIconButton } from './dom';
 import { makeArrowsIcon, makeFitIcon, makeResetIcon, makeSettingsIcon } from './icons';
 import { closePageMenu, closePageMenuOutside } from './pageMenu';
-import { redraw, view, vscode } from './view';
+import { hasKind, redraw, view, vscode } from './view';
 import { fitToView } from './viewport';
 
 // the toolbar in the top-left corner and its popups: reset, fit, and the arrow settings
@@ -13,6 +15,13 @@ const ARROW_MODES: { mode: ArrowMode; name: string; title: string }[] = [
     { mode: 'hidden', name: 'Hidden', title: 'Only the selected box\'s arrows' },
     { mode: 'default', name: 'Default', title: 'Faint, except the selected box\'s arrows' },
     { mode: 'full', name: 'Full', title: 'Every arrow in full' },
+];
+
+// the kinds of arrows the arrow settings can switch on and off, with their button names and what each is, on hover
+const ARROW_KIND_OPTIONS: { kind: EdgeKind; name: string; title: string }[] = [
+    { kind: 'import', name: 'Imports', title: 'One box importing another' },
+    { kind: 'event', name: 'Events', title: 'One box emitting an event that another listens for' },
+    { kind: 'message', name: 'Messages', title: 'One box posting a message that another handles' },
 ];
 
 /**
@@ -40,6 +49,40 @@ function handleArrowModeClick(event: MouseEvent): void {
     const button = event.currentTarget as HTMLElement;
     view.arrowMode = button.dataset.mode as ArrowMode;
     showArrowMode();
+    redraw();
+}
+
+/**
+ * Shows which kinds of arrows draw in the arrow settings: each shown kind's button pressed. A kind the repo has none of
+ * is off, and its button can't be pressed.
+ */
+export function showArrowKinds(): void {
+    for (const button of document.querySelectorAll<HTMLButtonElement>('.arrow-kind')) {
+        const kind = button.dataset.kind as EdgeKind;
+        const present = hasKind(kind);
+        button.disabled = !present;
+        button.setAttribute('aria-pressed', String(present && !view.hiddenKinds.has(kind)));
+        button.title = present ? button.dataset.hint! : 'No ' + kindWords(kind).many + ' found';
+    }
+}
+
+/**
+ * Turns the clicked kind of arrow on or off, then redraws, which also saves it.
+ * @param event The browser's mouse event, on one of the kind buttons.
+ */
+function handleArrowKindClick(event: MouseEvent): void {
+    const kind = (event.currentTarget as HTMLElement).dataset.kind as EdgeKind;
+    if (view.hiddenKinds.has(kind)) {
+        view.hiddenKinds.delete(kind);
+    } else {
+        view.hiddenKinds.add(kind);
+
+        // a selected arrow of that kind goes with the rest
+        if (view.selectedEdge !== undefined && view.selectedEdge.kind === kind) {
+            view.selectedEdge = undefined;
+        }
+    }
+    showArrowKinds();
     redraw();
 }
 
@@ -214,9 +257,29 @@ export function drawToolbar(): HTMLElement {
     }
     showArrowMode();
 
+    // which kinds of arrows draw: one button per kind, pressed while it's shown, each with a piece of its line, solid or
+    // dashed
+    const types = makePopupRow('Types', 'Which kinds of links draw as arrows');
+    arrows.appendChild(types.row);
+    for (const option of ARROW_KIND_OPTIONS) {
+        const button = makeElement('button', 'text-button arrow-kind');
+        button.dataset.kind = option.kind;
+        button.dataset.hint = option.title;
+        button.title = option.title;
+        const sample = makeElement('span', 'kind-sample');
+        if (isRuntimeKind(option.kind)) {
+            sample.classList.add('kind-sample-runtime');
+        }
+        button.appendChild(sample);
+        button.append(option.name);
+        button.addEventListener('click', handleArrowKindClick);
+        types.control.appendChild(button);
+    }
+    showArrowKinds();
+
     // how deep arrows go below the folder each lives in; typed or stepped, from 1 up to the deepest level, which is set
     // once a graph arrives
-    const depthTitle = 'Levels below each arrow\'s folder before it groups';
+    const depthTitle = 'How many levels deep arrows reach into boxes before merging';
     const depth = makePopupRow('Depth', depthTitle);
     arrows.appendChild(depth.row);
     const depthInput = document.createElement('input');
