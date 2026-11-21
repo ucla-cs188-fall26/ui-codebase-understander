@@ -2,6 +2,7 @@ import * as assert from 'assert';
 import { buildEdges, buildTree } from '../graph/build';
 import { FoundImport, scanImports } from '../graph/imports';
 import { resolveImport } from '../graph/resolve';
+import { scanFile } from '../graph/scan';
 
 suite('buildTree', () => {
     test('creates directories and counts direct children', () => {
@@ -72,6 +73,47 @@ suite('scanImports', () => {
         const imports = scanImports(source);
 
         assert.deepStrictEqual(imports, [{ path: './x', lines: { start: 5, end: 5 } }]);
+    });
+
+    test('finds every way of importing, including types and re-exports', () => {
+        const source = [
+            "import type { Shape } from './shape';",
+            "export * as tools from './tools';",
+            "export { draw } from './draw';",
+            "import fs = require('./fs');",
+            "const later = import('./later');",
+            "let size: import('./size').Size;",
+            "declare module './plugin' {",
+            '    interface Options {}',
+            '}',
+        ].join('\n');
+
+        const imports = scanImports(source);
+
+        assert.deepStrictEqual(imports.map((found) => found.path), [
+            './shape', './tools', './draw', './fs', './later', './size', './plugin',
+        ]);
+    });
+
+    test('a declare module in a file without imports or exports declares a module, rather than importing one', () => {
+        const source = "declare module 'some-package' {\n    export const value: number;\n}";
+
+        assert.deepStrictEqual(scanImports(source), []);
+    });
+});
+
+suite('scanFile', () => {
+    test('finds imports, events and messages in one read', () => {
+        const source = [
+            "import { bus } from './bus';",
+            "bus.emit('saved');",
+            "vscode.postMessage({ type: 'open' });",
+        ].join('\n');
+
+        const scan = scanFile(source, 'a.ts');
+
+        assert.deepStrictEqual(scan.imports, [{ path: './bus', lines: { start: 1, end: 1 } }]);
+        assert.deepStrictEqual(scan.signals.sends.map((signal) => signal.kind + ' ' + signal.name), ['event saved', 'message open']);
     });
 });
 

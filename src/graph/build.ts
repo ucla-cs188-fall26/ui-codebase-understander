@@ -53,7 +53,7 @@ export function buildTree(repoName: string, paths: string[]): Node[] {
 
 /**
  * Turns each file's raw import paths into edges between repo files.
- * @param importsByFile Every repo file, mapped to the imports written in it, from scanImports.
+ * @param importsByFile Every repo file, mapped to the imports written in it, from scanFile.
  * @returns One edge per file-to-file import, carrying the lines of the first import of that file. Packages get no
  *   edge.
  */

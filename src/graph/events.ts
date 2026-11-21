@@ -1,5 +1,5 @@
 import * as ts from 'typescript';
-import { posix } from 'path';
+import { Collector, lineOf, parseFile, walk } from './syntax';
 import { Edge, LineRange } from './types';
 
 // method names that send an event, and ones that listen for it, as Node's EventEmitter and socket.io name them
@@ -51,12 +51,19 @@ export interface FoundSignals {
  * @returns What it sends and what it receives, each in the order they're written.
  */
 export function scanSignals(source: string, path: string): FoundSignals {
-    const extension = posix.extname(path);
-    const hasTags = extension === '.tsx' || extension === '.jsx';
-    const scriptKind = hasTags ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
-    const setParentNodes = false;
-    const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, setParentNodes, scriptKind);
+    const file = parseFile(source, path);
+    const signals = signalCollector(file);
+    walk(file, [signals]);
+    return signals.finish();
+}
 
+/**
+ * Makes a collector for the events and messages a file sends and receives, to find them while its syntax tree is
+ * walked. What counts is described at scanSignals.
+ * @param file The file's syntax tree.
+ * @returns The collector; its result is what the file sends and receives, each in the order they're written.
+ */
+export function signalCollector(file: ts.SourceFile): Collector<FoundSignals> {
     const found: FoundSignals = { sends: [], receives: [] };
 
     // checks of a field against a name, like msg.command === 'alert', which only count once it's known the file
@@ -68,20 +75,16 @@ export function scanSignals(source: string, path: string): FoundSignals {
     // function so a name used in two functions isn't mixed up
     const scopes: Map<string, FieldName[]>[] = [new Map()];
 
-    function lineOf(node: ts.Node): LineRange {
-        const line = file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1;
-        return { start: line, end: line };
-    }
-
     function add(list: FoundSignal[], kind: SignalKind, name: Name, node: ts.Node, field?: string): void {
-        const signal: FoundSignal = { kind: kind, name: name.text, isConstant: name.isConstant, lines: lineOf(node) };
+        const signal: FoundSignal = { kind: kind, name: name.text, isConstant: name.isConstant, lines: lineOf(file, node) };
         if (field !== undefined) {
             signal.field = field;
         }
         list.push(signal);
     }
 
-    function visit(node: ts.Node): void {
+    // each node, before the nodes inside it
+    function enter(node: ts.Node): void {
         if (ts.isCallExpression(node)) {
             visitCall(node);
         }
@@ -123,13 +126,15 @@ export function scanSignals(source: string, path: string): FoundSignals {
             listensForMessages = true;
         }
 
-        // every node inside, with a new scope for each function
-        const isFunction = ts.isFunctionLike(node);
-        if (isFunction) {
+        // the nodes inside a function get a scope of their own
+        if (ts.isFunctionLike(node)) {
             scopes.push(new Map());
         }
-        ts.forEachChild(node, visit);
-        if (isFunction) {
+    }
+
+    // each node, after the nodes inside it
+    function leave(node: ts.Node): void {
+        if (ts.isFunctionLike(node)) {
             scopes.pop();
         }
     }
@@ -184,20 +189,23 @@ export function scanSignals(source: string, path: string): FoundSignals {
         return namedFields(posted);
     }
 
-    visit(file);
-
-    if (listensForMessages) {
-        const fields = decidingFields(checks);
-        for (const check of checks) {
-            if (fields.has(check.field!)) {
-                found.receives.push(check);
+    // once every node is seen: a file that listens for messages receives the names its deciding field is checked for
+    function finish(): FoundSignals {
+        if (listensForMessages) {
+            const fields = decidingFields(checks);
+            for (const check of checks) {
+                if (fields.has(check.field!)) {
+                    found.receives.push(check);
+                }
             }
+            found.receives.sort(function byLine(a: FoundSignal, b: FoundSignal): number {
+                return a.lines.start - b.lines.start;
+            });
         }
-        found.receives.sort(function byLine(a: FoundSignal, b: FoundSignal): number {
-            return a.lines.start - b.lines.start;
-        });
+        return found;
     }
-    return found;
+
+    return { enter: enter, leave: leave, finish: finish };
 }
 
 // an event or message name as it's written: its text, and whether it's a constant's name or a string
@@ -356,7 +364,7 @@ function isNodeEvent(name: Name): boolean {
  * file that receives the same one, since that's where the code goes next when it's sent. The same means the same kind,
  * field and name, written the same way: the constant SAVED and the string 'SAVED' are kept apart, since nothing says
  * the constant holds that string.
- * @param signalsByFile Every code file, mapped to what it sends and receives, from scanSignals.
+ * @param signalsByFile Every code file, mapped to what it sends and receives, from scanFile.
  * @returns One edge per sending file, receiving file, kind and name, carrying the lines of the first send of it in the
  *   sending file. A file receiving its own event or message gets no edge.
  */
